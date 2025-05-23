@@ -1,8 +1,13 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine
 from app.core.config import settings
 import alpaca_trade_api as tradeapi
+import pytz
+from datetime import datetime, timedelta
 
 # Database connection
 engine = create_engine(settings.DATABASE_URL)
@@ -27,29 +32,72 @@ ph_1m = api.get_portfolio_history(period="1M", timeframe="1D")
 ph_1y = api.get_portfolio_history(period="1A", timeframe="1D")
 
 print("24hr equity:", ph_24h.equity)
+print("24hr timestamps:", getattr(ph_24h, 'timestamp', None))
 print("1M equity:", ph_1m.equity)
+print("1M timestamps:", getattr(ph_1m, 'timestamp', None))
 print("1Y equity:", ph_1y.equity)
+print("1Y timestamps:", getattr(ph_1y, 'timestamp', None))
 
-def calc_gain_loss(history):
+# Helper to check if history is valid (not all zeros, enough points)
+def is_valid_history(history, min_points=2):
+    equity = [v for v in history.equity if v > 0]
+    return len(equity) >= min_points
+
+# Improved gain/loss calculation with time zone alignment for 24hr
+local_tz = pytz.timezone(settings.TIMEZONE)
+now = datetime.now(local_tz)
+
+def calc_gain_loss(history, period_label):
     equity = history.equity
-    start = next((v for v in equity if v > 0), None)
-    end = equity[-1]
+    timestamps = getattr(history, 'timestamp', None)
+    # Remove zeros
+    nonzero = [(i, v) for i, v in enumerate(equity) if v > 0]
+    if len(nonzero) < 2:
+        return None, None
+    # For 24hr, align to last 24hr window using timestamps
+    if period_label == '24h' and timestamps is not None:
+        times = [datetime.fromtimestamp(ts, local_tz) for ts in timestamps]
+        cutoff = now - timedelta(hours=24)
+        window = [(t, v) for (t, v) in zip(times, equity) if v > 0 and t >= cutoff]
+        if len(window) < 2:
+            return None, None
+        start = window[0][1]
+        end = window[-1][1]
+    else:
+        # Use first and last nonzero for 1M/1Y, but only if enough data and first nonzero is early enough
+        if len(nonzero) < 5:
+            return None, None
+        first_nonzero_index = nonzero[0][0]
+        total_len = len(equity)
+        if first_nonzero_index > int(0.2 * total_len):
+            return None, None
+        start = nonzero[0][1]
+        end = nonzero[-1][1]
     if start is None or end is None:
-        return 0.0, 0.0
+        return None, None
     gain = end - start
     pct = (gain / start) * 100 if start != 0 else 0.0
     return gain, pct
 
-gain_24h, pct_24h = calc_gain_loss(ph_24h)
-gain_1m, pct_1m = calc_gain_loss(ph_1m)
-gain_1y, pct_1y = calc_gain_loss(ph_1y)
+gain_24h, pct_24h = calc_gain_loss(ph_24h, '24h')
+gain_1m, pct_1m = calc_gain_loss(ph_1m, '1m')
+gain_1y, pct_1y = calc_gain_loss(ph_1y, '1y')
 
 # Display metrics at the top
 colA, colB, colC, colD = st.columns(4)
 colA.metric("Portfolio Value", f"${portfolio_value:,.2f}")
-colB.metric("24hr Gain/Loss", f"${gain_24h:,.2f}", f"{pct_24h:.2f}%")
-colC.metric("1M Gain/Loss", f"${gain_1m:,.2f}", f"{pct_1m:.2f}%")
-colD.metric("1Y Gain/Loss", f"${gain_1y:,.2f}", f"{pct_1y:.2f}%")
+if gain_24h is not None:
+    colB.metric("24hr Gain/Loss", f"${gain_24h:,.2f}", f"{pct_24h:.2f}%")
+else:
+    colB.metric("24hr Gain/Loss", "N/A", "N/A")
+if gain_1m is not None:
+    colC.metric("1M Gain/Loss", f"${gain_1m:,.2f}", f"{pct_1m:.2f}%")
+else:
+    colC.metric("1M Gain/Loss", "N/A", "N/A")
+if gain_1y is not None:
+    colD.metric("1Y Gain/Loss", f"${gain_1y:,.2f}", f"{pct_1y:.2f}%")
+else:
+    colD.metric("1Y Gain/Loss", "N/A", "N/A")
 
 # Sidebar - Profile
 st.sidebar.header("Bot Profile")
