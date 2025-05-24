@@ -217,35 +217,49 @@ if run_test:
         # Flatten columns if they are tuples (MultiIndex)
         df.columns = ['_'.join(col) if isinstance(col, tuple) else col for col in df.columns]
         df.columns = [col.lower() for col in df.columns]
+        print("DataFrame columns after flattening:", df.columns.tolist())
         # If 'close' is missing but 'adj close' exists, use it
         if 'close' not in df.columns and 'adj close' in df.columns:
             df['close'] = df['adj close']
+        # If 'close' is missing but 'close_aapl' exists, use it
+        if 'close' not in df.columns and 'close_aapl' in df.columns:
+            df['close'] = df['close_aapl']
+        print("DataFrame columns after checking for 'close' and 'adj close':", df.columns.tolist())
         if 'close' not in df.columns:
             st.sidebar.error("No 'close' price found in data for symbol.")
         else:
-            predictor = MLPredictor()
-            try:
-                preds = predictor.predict(df)
-                prob_3d_up, prob_3d_down = preds['3d']
-                prob_5d_up, prob_5d_down = preds['5d']
-                # Insert a test trade into the DB
-                import sqlalchemy
-                with engine.begin() as conn:
-                    conn.execute(sqlalchemy.text('''
-                        INSERT INTO trades (symbol, strategy_type, entry_price, quantity, status, entry_time, reason)
-                        VALUES (:symbol, :strategy_type, :entry_price, :quantity, :status, :entry_time, :reason)
-                    '''), {
-                        'symbol': test_symbol,
-                        'strategy_type': 'ML_TEST',
-                        'entry_price': float(df['close'].iloc[-1]),
-                        'quantity': 1,
-                        'status': 'EXECUTED',
-                        'entry_time': datetime.now().isoformat(),
-                        'reason': f'TEST_ML_TRADE 3d_up={prob_3d_up:.2%}, 5d_up={prob_5d_up:.2%}, 3d_down={prob_3d_down:.2%}, 5d_down={prob_5d_down:.2%}'
-                    })
-                st.sidebar.success(f"Test ML trade inserted for {test_symbol}.")
-            except Exception as e:
-                st.sidebar.error(f"ML prediction failed: {e}")
+            if len(df) >= 30:  # Ensure at least 30 days of data
+                predictor = MLPredictor()
+                try:
+                    print("DataFrame before prediction:", df)
+                    preds = predictor.predict(df)
+                    print("Predictor output:", preds)
+                    if preds is not None:
+                        prob_3d_up, prob_3d_down = preds['3d']
+                        prob_5d_up, prob_5d_down = preds['5d']
+                        # Insert a test trade into the DB
+                        import sqlalchemy
+                        with engine.begin() as conn:
+                            conn.execute(sqlalchemy.text('''
+                                INSERT INTO trades (symbol, strategy_type, entry_price, quantity, status, entry_time, reason)
+                                VALUES (:symbol, :strategy_type, :entry_price, :quantity, :status, :entry_time, :reason)
+                            '''), {
+                                'symbol': test_symbol,
+                                'strategy_type': 'ML_TEST',
+                                'entry_price': float(df['close'].iloc[-1]),
+                                'quantity': 1,
+                                'status': 'EXECUTED',
+                                'entry_time': datetime.now().isoformat(),
+                                'reason': f'TEST_ML_TRADE 3d_up={prob_3d_up:.2%}, 5d_up={prob_5d_up:.2%}, 3d_down={prob_3d_down:.2%}, 5d_down={prob_5d_down:.2%}'
+                            })
+                        st.sidebar.success(f"Test ML trade inserted for {test_symbol}.")
+                    else:
+                        st.sidebar.error("ML model returned no predictions. Market may be closed or data is incomplete.")
+                except Exception as e:
+                    st.sidebar.error(f"ML prediction failed: {e}")
+                    print("Error making predictions:", e)
+            else:
+                st.sidebar.error("Not enough data for prediction. Market may be closed.")
     else:
         st.sidebar.error("No data found for symbol.")
 
