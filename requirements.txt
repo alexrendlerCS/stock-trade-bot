@@ -22,4 +22,6 @@ matplotlib>=3.7.1
 seaborn>=0.12.2
 newsapi-python==0.2.7
 transformers==4.36.2
-torch==2.1.2 
+torch
+torchvision
+torchaudio 
