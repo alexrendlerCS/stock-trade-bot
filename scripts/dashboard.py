@@ -8,6 +8,8 @@ from app.core.config import settings
 import alpaca_trade_api as tradeapi
 import pytz
 from datetime import datetime, timedelta
+import re
+from app.services.ml_predictor import MLPredictor
 
 # Database connection
 engine = create_engine(settings.DATABASE_URL)
@@ -143,5 +145,114 @@ st.dataframe(perf_df, use_container_width=True)
 # Equity curve (if available)
 if not perf_df.empty:
     st.line_chart(perf_df.set_index('date')['total_pnl'], use_container_width=True)
+
+# --- ML Signal Confidence Visualization ---
+st.subheader("ML Signal Confidence (Recent)")
+
+# Extract ML signals from trades (by strategy_type or reason/indicators)
+ml_trades = trades_df[trades_df['strategy_type'].str.lower().str.contains('ml|machine', na=False) |
+                     trades_df['reason'].str.contains('ML model', na=False)]
+
+# Try to extract confidence from indicators or reason
+def extract_confidence(row):
+    # Try to extract from indicators string
+    if 'indicators' in row and isinstance(row['indicators'], str):
+        match = re.search(r'3d_up=([0-9.]+)%', row['indicators'])
+        if match:
+            return float(match.group(1)) / 100
+        match = re.search(r'3d_down=([0-9.]+)%', row['indicators'])
+        if match:
+            return float(match.group(1)) / 100
+    # Try to extract from reason string
+    if 'reason' in row and isinstance(row['reason'], str):
+        match = re.search(r'3-day probability=([0-9.]+)%', row['reason'])
+        if match:
+            return float(match.group(1)) / 100
+    return None
+
+if not ml_trades.empty:
+    ml_trades = ml_trades.copy()
+    ml_trades['confidence'] = ml_trades.apply(extract_confidence, axis=1)
+    ml_trades['entry_time'] = pd.to_datetime(ml_trades['entry_time'])
+    ml_trades = ml_trades.sort_values('entry_time')
+
+    # --- Interactive filters ---
+    symbols = ml_trades['symbol'].unique().tolist()
+    selected_symbols = st.multiselect("Select symbol(s) to display", symbols, default=symbols)
+    signal_types = ml_trades['signal_type'].dropna().unique().tolist() if 'signal_type' in ml_trades.columns else []
+    if signal_types:
+        selected_signal_types = st.multiselect("Select signal type(s)", signal_types, default=signal_types)
+    else:
+        selected_signal_types = []
+
+    filtered = ml_trades[ml_trades['symbol'].isin(selected_symbols)]
+    if selected_signal_types:
+        filtered = filtered[filtered['signal_type'].isin(selected_signal_types)]
+
+    st.dataframe(filtered[['entry_time', 'symbol', 'signal_type', 'confidence', 'reason']], use_container_width=True)
+    if not filtered.empty:
+        st.line_chart(
+            filtered.set_index('entry_time')[['confidence']],
+            use_container_width=True
+        )
+    else:
+        st.info("No ML signals for selected filters.")
+else:
+    st.info("No recent ML signals found in trades.")
+
+# --- Test ML Strategy Button ---
+st.sidebar.subheader("Test ML Strategy")
+# Symbol selector for test
+all_symbols = [s for s in trades_df['symbol'].unique() if isinstance(s, str)]
+default_symbol = all_symbols[0] if all_symbols else 'TQQQ'
+test_symbol = st.sidebar.selectbox("Select symbol for test", all_symbols or ['TQQQ'], index=0)
+run_test = st.sidebar.button("Run Test ML Strategy")
+finish_test = st.sidebar.button("Finish Test (Remove Test Trades)")
+
+if run_test:
+    # Fetch latest data for the symbol (last 30 days)
+    import yfinance as yf
+    df = yf.download(test_symbol, period='30d', auto_adjust=False)
+    if not df.empty:
+        # Flatten columns if they are tuples (MultiIndex)
+        df.columns = ['_'.join(col) if isinstance(col, tuple) else col for col in df.columns]
+        df.columns = [col.lower() for col in df.columns]
+        # If 'close' is missing but 'adj close' exists, use it
+        if 'close' not in df.columns and 'adj close' in df.columns:
+            df['close'] = df['adj close']
+        if 'close' not in df.columns:
+            st.sidebar.error("No 'close' price found in data for symbol.")
+        else:
+            predictor = MLPredictor()
+            try:
+                preds = predictor.predict(df)
+                prob_3d_up, prob_3d_down = preds['3d']
+                prob_5d_up, prob_5d_down = preds['5d']
+                # Insert a test trade into the DB
+                import sqlalchemy
+                with engine.begin() as conn:
+                    conn.execute(sqlalchemy.text('''
+                        INSERT INTO trades (symbol, strategy_type, entry_price, quantity, status, entry_time, reason)
+                        VALUES (:symbol, :strategy_type, :entry_price, :quantity, :status, :entry_time, :reason)
+                    '''), {
+                        'symbol': test_symbol,
+                        'strategy_type': 'ML_TEST',
+                        'entry_price': float(df['close'].iloc[-1]),
+                        'quantity': 1,
+                        'status': 'EXECUTED',
+                        'entry_time': datetime.now().isoformat(),
+                        'reason': f'TEST_ML_TRADE 3d_up={prob_3d_up:.2%}, 5d_up={prob_5d_up:.2%}, 3d_down={prob_3d_down:.2%}, 5d_down={prob_5d_down:.2%}'
+                    })
+                st.sidebar.success(f"Test ML trade inserted for {test_symbol}.")
+            except Exception as e:
+                st.sidebar.error(f"ML prediction failed: {e}")
+    else:
+        st.sidebar.error("No data found for symbol.")
+
+if finish_test:
+    import sqlalchemy
+    with engine.begin() as conn:
+        conn.execute(sqlalchemy.text("DELETE FROM trades WHERE reason LIKE 'TEST_ML_TRADE%'"))
+    st.sidebar.success("All test trades removed.")
 
 st.caption("Made with ❤️ using Streamlit and FastAPI | v1.0.0") 
