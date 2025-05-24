@@ -25,95 +25,128 @@ for symbol in symbols:
     # Clean up column names and standardize them
     df.columns = [col.lower().replace(' ', '_') for col in df.columns]
     
-    # Map yfinance columns to expected names - handle duplicates
-    new_df = pd.DataFrame(index=df.index)
+    # Map yfinance columns to expected format
+    column_mapping = {
+        f'adj_close_{symbol.lower()}': 'close',
+        f'close_{symbol.lower()}': 'close', 
+        f'high_{symbol.lower()}': 'high',
+        f'low_{symbol.lower()}': 'low',
+        f'open_{symbol.lower()}': 'open',
+        f'volume_{symbol.lower()}': 'volume',
+        'adj_close': 'close',
+        'close': 'close',
+        'high': 'high', 
+        'low': 'low',
+        'open': 'open',
+        'volume': 'volume'
+    }
     
-    # Find and map the correct columns
-    for col in df.columns:
-        if 'close' in col and 'close' not in new_df.columns:
-            new_df['close'] = df[col]
-        elif 'high' in col and 'high' not in new_df.columns:
-            new_df['high'] = df[col]
-        elif 'low' in col and 'low' not in new_df.columns:
-            new_df['low'] = df[col]
-        elif 'open' in col and 'open' not in new_df.columns:
-            new_df['open'] = df[col]
-        elif 'volume' in col and 'volume' not in new_df.columns:
-            new_df['volume'] = df[col]
+    # Apply column mapping
+    for old_col, new_col in column_mapping.items():
+        if old_col in df.columns:
+            df[new_col] = df[old_col]
     
-    df = new_df
-    
-    # Ensure we have the required columns
-    required_cols = ['close', 'high', 'low', 'open', 'volume']
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        print(f"Warning: Missing columns for {symbol}: {missing_cols}")
-        continue
+    # Keep only the essential columns
+    essential_cols = ['close', 'high', 'low', 'open', 'volume']
+    df = df[essential_cols].copy()
     
     print(f"Final DataFrame columns for {symbol}: {df.columns.tolist()}")
     print(f"DataFrame shape: {df.shape}")
-    print(f"Sample data:\n{df.head()}")
+    print("Sample data:")
+    print(df.head())
     
-    results = []
-    position = None
-    entry_price = 0
-    pnl = 0
+    # Simple backtesting logic
+    trades = []
     
-    for date in df.index[30:]:  # start after 30 days to have enough lookback
-        df_slice = df.loc[:date].copy()
-        preds = ml.predict(df_slice)
-        if preds:
-            prob_3d_up, prob_3d_down = preds['3d']
-            signal = None
-            if prob_3d_up > 0.6:
-                signal = 'BUY'
-            elif prob_3d_down > 0.6:
-                signal = 'SELL'
-            # Simulate simple strategy: buy/sell and close after 3 days
-            if signal == 'BUY' and position is None:
-                position = 'LONG'
-                entry_price = df_slice['close'].iloc[-1]
-                entry_date = date
-            elif signal == 'SELL' and position is None:
-                position = 'SHORT'
-                entry_price = df_slice['close'].iloc[-1]
-                entry_date = date
-            # Close position after 3 days
-            if position and (date - entry_date).days >= 3:
-                exit_price = df_slice['close'].iloc[-1]
-                if position == 'LONG':
-                    trade_pnl = exit_price - entry_price
-                else:
-                    trade_pnl = entry_price - exit_price
-                pnl += trade_pnl
-                results.append({
-                    'symbol': symbol,
-                    'entry_date': entry_date,
-                    'exit_date': date,
-                    'position': position,
-                    'entry_price': entry_price,
-                    'exit_price': exit_price,
-                    'trade_pnl': trade_pnl,
-                    'cum_pnl': pnl,
-                    'prob_3d_up': prob_3d_up,
-                    'prob_3d_down': prob_3d_down
-                })
-                position = None
+    for i in range(30, len(df)):  # Start from day 30 to have enough data for features
+        current_data = df.iloc[:i+1]  # Data up to current day
+        
+        # Get prediction with news sentiment
+        prediction = ml.predict(current_data, symbol=symbol)
+        
+        if prediction is None:
+            continue
+        
+        # Extract prediction probabilities
+        prob_3d_up = prediction['3d'][0]
+        prob_3d_down = prediction['3d'][1]
+        
+        # Get sentiment info if available
+        sentiment_info = prediction.get('sentiment', {})
+        
+        # Simple trading strategy based on prediction confidence
+        confidence_threshold = 0.6
+        
+        if prob_3d_up > confidence_threshold:
+            position = 'LONG'
+        elif prob_3d_down > confidence_threshold:
+            position = 'SHORT'
         else:
-            print(f"No predictions for {symbol} on {date}")
-            break  # Break after first failure to avoid spam
+            continue  # No trade
+        
+        # Calculate trade results (simplified)
+        entry_price = df.iloc[i]['close']
+        entry_date = df.index[i]
+        
+        # Exit after 3 days or at end of data
+        exit_idx = min(i + 3, len(df) - 1)
+        exit_price = df.iloc[exit_idx]['close']
+        exit_date = df.index[exit_idx]
+        
+        if position == 'LONG':
+            pnl = (exit_price - entry_price) / entry_price * 100
+        else:  # SHORT
+            pnl = (entry_price - exit_price) / entry_price * 100
+        
+        trades.append({
+            'symbol': symbol,
+            'entry_date': entry_date,
+            'exit_date': exit_date,
+            'position': position,
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'trade_pnl': pnl,
+            'prob_3d_up': prob_3d_up,
+            'prob_3d_down': prob_3d_down,
+            'sentiment_score': sentiment_info.get('sentiment_score', 0),
+            'news_count': sentiment_info.get('news_count', 0),
+            'sentiment_strength': sentiment_info.get('sentiment_strength', 0)
+        })
     
-    all_results.extend(results)
-    print(f"Completed {symbol}: {len(results)} trades")
+    print(f"Completed {symbol}: {len(trades)} trades")
+    all_results.extend(trades)
 
-results_df = pd.DataFrame(all_results)
-print(f"\nBacktest completed. Total trades: {len(results_df)}")
-print(results_df.head())
+print(f"\nBacktest completed. Total trades: {len(all_results)}")
 
-# Summary stats
-if not results_df.empty:
-    print("\nSummary by symbol:")
-    print(results_df.groupby('symbol')['trade_pnl'].agg(['count', 'sum', 'mean']))
-    print("\nTotal PnL:", results_df['trade_pnl'].sum())
+if all_results:
+    # Create results DataFrame
+    results_df = pd.DataFrame(all_results)
+    
+    # Calculate cumulative PnL
+    results_df['cum_pnl'] = results_df['trade_pnl'].cumsum()
+    
+    print(results_df)
+    
+    # Summary by symbol
+    summary = results_df.groupby('symbol')['trade_pnl'].agg(['count', 'sum', 'mean'])
+    print(f"\nSummary by symbol:")
+    print(summary)
+    
+    print(f"\nTotal PnL: {results_df['trade_pnl'].sum()}")
+    
+    # Sentiment analysis summary
+    if 'sentiment_score' in results_df.columns:
+        print(f"\nSentiment Analysis Summary:")
+        print(f"Average sentiment score: {results_df['sentiment_score'].mean():.3f}")
+        print(f"Average news count: {results_df['news_count'].mean():.1f}")
+        print(f"Average sentiment strength: {results_df['sentiment_strength'].mean():.3f}")
+        
+        # Correlation between sentiment and PnL
+        sentiment_pnl_corr = results_df['sentiment_score'].corr(results_df['trade_pnl'])
+        print(f"Correlation between sentiment and PnL: {sentiment_pnl_corr:.3f}")
+    
+    # Save results
+    results_df.to_csv('backtest_results_with_sentiment.csv', index=False)
+    print(f"\nResults saved to 'backtest_results_with_sentiment.csv'")
 else:
-    print("No trades were made in the backtest.") 
+    print("No trades executed!") 

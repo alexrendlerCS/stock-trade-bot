@@ -24,4 +24,8 @@ newsapi-python==0.2.7
 transformers==4.36.2
 torch
 torchvision
-torchaudio 
+torchaudio
+# New dependencies for enhanced trading bot
+schedule>=1.2.0
+plotly>=5.17.0
+tqdm>=4.66.0 

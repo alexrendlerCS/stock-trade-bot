@@ -1,5 +1,5 @@
-# Commented out news sentiment to avoid errors for now
-# from .news_sentiment import NewsSentimentAnalyzer
+# Now importing news sentiment since it's working
+from .news_sentiment import NewsSentimentAnalyzer
 import joblib
 import pandas as pd
 from typing import Optional, Dict, Tuple
@@ -27,14 +27,21 @@ class MLPredictor:
                 logger.warning("model_features.txt not found, using fallback feature list")
                 self.feature_cols = self._get_fallback_features()
             
-            # Temporarily disable news analyzer to avoid errors
-            # self.news_analyzer = NewsSentimentAnalyzer()
+            # Initialize news sentiment analyzer
+            try:
+                self.news_analyzer = NewsSentimentAnalyzer()
+                logger.info("News Sentiment Analyzer initialized successfully")
+            except Exception as e:
+                logger.warning(f"Could not initialize News Sentiment Analyzer: {str(e)}")
+                self.news_analyzer = None
+            
             logger.info("ML models loaded successfully")
         except Exception as e:
             logger.error(f"Error loading models: {str(e)}")
             self.model_3d = None
             self.model_5d = None
             self.feature_cols = []
+            self.news_analyzer = None
         
     def _get_fallback_features(self):
         """Fallback feature list if file is not found"""
@@ -47,9 +54,13 @@ class MLPredictor:
             'high_low_ratio', 'day_of_week', 'month'
         ]
         
-    def predict(self, df: pd.DataFrame) -> Optional[Dict[str, Tuple[float, float]]]:
+    def predict(self, df: pd.DataFrame, symbol: str = None) -> Optional[Dict[str, Tuple[float, float]]]:
         """
-        Make predictions using the ML models.
+        Make predictions using the ML models with optional news sentiment.
+        
+        Args:
+            df: Price data DataFrame
+            symbol: Stock symbol for news sentiment analysis
         """
         try:
             if self.model_3d is None or self.model_5d is None:
@@ -63,6 +74,15 @@ class MLPredictor:
                 logger.error("Could not prepare features")
                 return None
             
+            # Add news sentiment features if available
+            if symbol and self.news_analyzer:
+                sentiment_features = self._get_sentiment_features(symbol)
+                if sentiment_features:
+                    print(f"Adding news sentiment features for {symbol}")
+                    # Add sentiment features to the latest row
+                    for feature_name, feature_value in sentiment_features.items():
+                        features_df.loc[features_df.index[-1], feature_name] = feature_value
+            
             # Get the latest feature vector with only the model features
             latest_features = features_df[self.feature_cols].iloc[-1:].fillna(0)
             
@@ -73,15 +93,57 @@ class MLPredictor:
             pred_3d = self.model_3d.predict_proba(latest_features)[0]
             pred_5d = self.model_5d.predict_proba(latest_features)[0]
             
-            return {
+            # Get sentiment info for the response
+            sentiment_info = {}
+            if symbol and self.news_analyzer:
+                try:
+                    sentiment_data = self.news_analyzer.get_news_sentiment(symbol, lookback_days=3)
+                    sentiment_info = {
+                        'sentiment_score': sentiment_data['sentiment_score'],
+                        'news_count': sentiment_data['news_count'],
+                        'sentiment_strength': sentiment_data['sentiment_strength']
+                    }
+                except Exception as e:
+                    logger.warning(f"Could not get sentiment info: {str(e)}")
+            
+            result = {
                 '3d': (pred_3d[1], pred_3d[0]),  # (up_prob, down_prob)
                 '5d': (pred_5d[1], pred_5d[0])   # (up_prob, down_prob)
             }
+            
+            # Add sentiment info if available
+            if sentiment_info:
+                result['sentiment'] = sentiment_info
+            
+            return result
+            
         except Exception as e:
             logger.error(f"Error making predictions: {str(e)}")
             import traceback
             traceback.print_exc()
             return None 
+    
+    def _get_sentiment_features(self, symbol: str) -> Optional[Dict[str, float]]:
+        """Get news sentiment features for a symbol"""
+        try:
+            sentiment_data = self.news_analyzer.get_news_sentiment(symbol, lookback_days=7)
+            
+            # Create sentiment features that can enhance predictions
+            sentiment_features = {
+                'news_sentiment_score': sentiment_data['sentiment_score'],
+                'news_sentiment_strength': sentiment_data['sentiment_strength'],
+                'news_positive_ratio': sentiment_data['positive_ratio'],
+                'news_negative_ratio': sentiment_data['negative_ratio'],
+                'news_volume': min(sentiment_data['news_volume'] / 50.0, 1.0),  # Normalize to 0-1
+                'recent_sentiment': sentiment_data['recent_sentiment']
+            }
+            
+            logger.info(f"Generated sentiment features for {symbol}: sentiment={sentiment_data['sentiment_score']:.3f}, volume={sentiment_data['news_volume']}")
+            return sentiment_features
+            
+        except Exception as e:
+            logger.warning(f"Could not get sentiment features for {symbol}: {str(e)}")
+            return None
     
     def _prepare_features(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """
