@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import pytz
 import pandas as pd
 from app.strategies.ema_crossover_strategy import EMACrossoverStrategy
+from app.strategies.ml_strategy import MLStrategy
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -17,6 +18,10 @@ api = tradeapi.REST(
     settings.ALPACA_SECRET_KEY,
     settings.ALPACA_BASE_URL
 )
+
+# Initialize strategies
+ema_strategy = EMACrossoverStrategy()
+ml_strategy = MLStrategy()
 
 def execute_market_open_tasks():
     """Execute tasks at market open"""
@@ -121,8 +126,41 @@ def execute_day_trading_strategy():
 
 def execute_swing_trade_signals():
     """Execute swing trading strategy"""
-    # TODO: Implement swing trading strategy logic
-    pass
+    try:
+        # List of symbols to trade
+        symbols = ["MSFT", "AAPL", "GOOGL", "AMZN", "META", "TQQQ"]
+        capital = 100000  # Replace with your portfolio logic
+        
+        for symbol in symbols:
+            # Fetch latest data
+            data = fetch_latest_data(symbol)
+            if data.empty:
+                continue
+            
+            # Get signals from both strategies
+            ema_signals = ema_strategy.generate_signals(data)
+            ml_signals = ml_strategy.generate_signals(data)
+            
+            # Combine signals
+            all_signals = ema_signals + ml_signals
+            
+            # Execute trades based on signals
+            for signal in all_signals:
+                # Calculate position size (1% of capital per trade)
+                price = data['close'].iloc[-1]
+                quantity = int(ml_strategy.calculate_position_size(capital, 0.01) // price)
+                
+                # Execute trade
+                execute_trade(
+                    symbol=signal.symbol,
+                    quantity=quantity,
+                    side='buy' if signal.signal_type == 'BUY' else 'sell',
+                    strategy_type=signal.strategy_type,
+                    reason=signal.reason
+                )
+    
+    except Exception as e:
+        logger.error(f"Error executing swing trade signals: {str(e)}")
 
 def update_long_term_positions():
     """Update long-term investment positions"""
@@ -166,25 +204,6 @@ def update_performance_metrics():
     # TODO: Implement performance metrics calculation
     pass
 
-def run_ema_strategy_and_trade(data: pd.DataFrame, capital: float):
-    """
-    Run the EMA crossover strategy, generate signals, and execute trades with detailed reasons.
-    """
-    strategy = EMACrossoverStrategy()
-    signals = strategy.generate_signals(data)
-    for signal in signals:
-        # Calculate position size (1% of capital per trade)
-        price = data['close'].iloc[-1]
-        quantity = int(strategy.calculate_position_size(capital, 0.01) // price)
-        side = 'buy' if signal.signal_type == 'BUY' else 'sell'
-        execute_trade(
-            symbol=signal.symbol,
-            quantity=quantity,
-            side=side,
-            strategy_type=signal.strategy_type,
-            reason=signal.reason
-        )
-
 def fetch_historical_data(symbol: str, start: str, end: str, timeframe: str = 'day') -> pd.DataFrame:
     """Fetch historical OHLCV data from Alpaca."""
     bars = api.get_bars(symbol, timeframe, start=start, end=end).df
@@ -207,23 +226,23 @@ def fetch_latest_data(symbol: str, lookback_days: int = 30) -> pd.DataFrame:
     start = end - timedelta(days=lookback_days)
     return fetch_historical_data(symbol, start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d'))
 
-def run_ema_strategy_and_trade_live(symbol: str, capital: float):
-    """Fetch live data, run EMA strategy, and execute trades for a symbol."""
+def run_ml_strategy_and_trade(symbol: str, capital: float):
+    """Run ML strategy and execute trades for a symbol."""
     data = fetch_latest_data(symbol)
     if data.empty:
         logger.warning(f"No data fetched for {symbol}, skipping strategy run.")
         return
-    run_ema_strategy_and_trade(data, capital)
-
-# --- Scheduler Integration ---
-def execute_market_open_tasks():
-    logger.info("Executing market open tasks")
-    update_positions()
-    # Example: run EMA strategy for a list of symbols at market open
-    symbols = ["AAPL", "MSFT", "GOOG"]  # You can expand this list
-    capital = 100000  # Replace with your portfolio logic
-    for symbol in symbols:
-        run_ema_strategy_and_trade_live(symbol, capital)
-    execute_day_trading_strategy()
-    execute_swing_trade_signals()
-    update_long_term_positions() 
+    
+    signals = ml_strategy.generate_signals(data)
+    for signal in signals:
+        # Calculate position size (1% of capital per trade)
+        price = data['close'].iloc[-1]
+        quantity = int(ml_strategy.calculate_position_size(capital, 0.01) // price)
+        
+        execute_trade(
+            symbol=signal.symbol,
+            quantity=quantity,
+            side='buy' if signal.signal_type == 'BUY' else 'sell',
+            strategy_type=signal.strategy_type,
+            reason=signal.reason
+        ) 

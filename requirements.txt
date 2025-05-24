@@ -17,4 +17,6 @@ requests==2.31.0
 pytz==2023.3
 streamlit==1.35.0
 pydantic-settings
-yfinance 
+yfinance
+matplotlib>=3.7.1
+seaborn>=0.12.2 
