@@ -172,6 +172,11 @@ class NewsSentimentAnalyzer:
                 negative_count = sum(1 for s in sentiments if s < 0)
                 neutral_count = sum(1 for s in sentiments if s == 0)
                 
+                # Calculate ratios
+                positive_ratio = positive_count / total_articles if total_articles > 0 else 0
+                negative_ratio = negative_count / total_articles if total_articles > 0 else 0
+                neutral_ratio = neutral_count / total_articles if total_articles > 0 else 0
+                
                 # Calculate final sentiment score (-1 to 1)
                 sentiment_score = sum(sentiments) / len(sentiments)
                 
@@ -191,6 +196,9 @@ class NewsSentimentAnalyzer:
                     'positive_count': positive_count,
                     'negative_count': negative_count,
                     'neutral_count': neutral_count,
+                    'positive_ratio': positive_ratio,
+                    'negative_ratio': negative_ratio,
+                    'neutral_ratio': neutral_ratio,
                     'timestamp': time.time()
                 }
                 
@@ -226,6 +234,9 @@ class NewsSentimentAnalyzer:
             'positive_count': 0,
             'negative_count': 0,
             'neutral_count': 0,
+            'positive_ratio': 0.0,
+            'negative_ratio': 0.0,
+            'neutral_ratio': 0.0,
             'timestamp': time.time()
         }
         
@@ -247,6 +258,9 @@ class NewsSentimentAnalyzer:
             'positive_count': 0,
             'negative_count': 0,
             'neutral_count': 0,
+            'positive_ratio': 0.0,
+            'negative_ratio': 0.0,
+            'neutral_ratio': 0.0,
             'timestamp': time.time()
         }
     

@@ -298,21 +298,21 @@ class LiveTradingBot:
         try:
             # Check if we already have a position in this symbol
             if signal.symbol in self.positions:
-                logger.info(f"❌ Trade rejected - Already have position in {signal.symbol}")
+                logger.info(f"Trade rejected - Already have position in {signal.symbol}")
                 logger.info(f"  Current position: {self.positions[signal.symbol].direction}")
                 logger.info(f"  Entry price: ${self.positions[signal.symbol].entry_price:.2f}")
                 return False
             
             # Check position limits
             if len(self.positions) >= self.max_positions:
-                logger.info(f"❌ Trade rejected - Maximum positions ({self.max_positions}) reached")
+                logger.info(f"Trade rejected - Maximum positions ({self.max_positions}) reached")
                 logger.info(f"  Current positions: {list(self.positions.keys())}")
                 return False
             
             # Calculate position size
             quantity = self.calculate_position_size(signal)
             if quantity == 0:
-                logger.info(f"❌ Trade rejected - Position size calculation returned 0 for {signal.symbol}")
+                logger.info(f"Trade rejected - Position size calculation returned 0 for {signal.symbol}")
                 logger.info(f"  Entry price: ${signal.entry_price:.2f}")
                 logger.info(f"  Available capital: ${self.portfolio_value:.2f}")
                 return False
@@ -343,7 +343,7 @@ class LiveTradingBot:
                 # Log to database
                 self._log_trade_to_db(signal, quantity, 'OPEN')
                 
-                logger.info(f"✅ Executed {signal.direction} trade: {signal.symbol} x{quantity} @ ${signal.entry_price:.2f}")
+                logger.info(f"Executed {signal.direction} trade: {signal.symbol} x{quantity} @ ${signal.entry_price:.2f}")
                 return True
             
             return False
@@ -366,7 +366,7 @@ class LiveTradingBot:
                 time_in_force='day'
             )
             
-            logger.info(f"📝 Paper trade submitted to Alpaca: {signal.direction} {signal.symbol} x{quantity}")
+            logger.info(f"Paper trade submitted to Alpaca: {signal.direction} {signal.symbol} x{quantity}")
             return True
             
         except Exception as e:
@@ -462,7 +462,7 @@ class LiveTradingBot:
             # Remove position from local tracking
             del self.positions[symbol]
             
-            logger.info(f"✅ Closed {position.direction} position: {symbol} @ ${exit_price:.2f} | P&L: ${pnl:.2f} | Reason: {reason}")
+            logger.info(f"Closed {position.direction} position: {symbol} @ ${exit_price:.2f} | P&L: ${pnl:.2f} | Reason: {reason}")
             
         except Exception as e:
             logger.error(f"Error closing position {symbol}: {str(e)}")
@@ -509,7 +509,7 @@ class LiveTradingBot:
                 logger.info("Market is closed")
                 return
             
-            logger.info("🔄 Starting trading cycle...")
+            logger.info("Starting trading cycle...")
             
             # Check existing positions first
             self.check_positions()
@@ -531,7 +531,7 @@ class LiveTradingBot:
             
             # Log portfolio status
             total_pnl = sum(pos.unrealized_pnl for pos in self.positions.values())
-            logger.info(f"💼 Portfolio: ${self.portfolio_value:.2f} | Open Positions: {len(self.positions)} | Unrealized P&L: ${total_pnl:.2f}")
+            logger.info(f"Portfolio: ${self.portfolio_value:.2f} | Open Positions: {len(self.positions)} | Unrealized P&L: ${total_pnl:.2f}")
             
         except Exception as e:
             logger.error(f"Error in trading cycle: {str(e)}")
@@ -568,7 +568,7 @@ def start_live_trading(symbols: List[str] = None, paper_trading: bool = True):
     # Schedule trading cycles
     schedule.every(5).minutes.do(bot.run_trading_cycle)  # Run every 5 minutes during market hours
     
-    logger.info("🚀 Live Trading Bot Started!")
+    logger.info("Started Live Trading Bot!")
     logger.info("Press Ctrl+C to stop")
     
     try:
@@ -576,7 +576,7 @@ def start_live_trading(symbols: List[str] = None, paper_trading: bool = True):
             schedule.run_pending()
             time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("🛑 Trading bot stopped by user")
+        logger.info("Trading bot stopped by user")
         
         # Close all positions
         for symbol in list(bot.positions.keys()):
