@@ -64,6 +64,19 @@ class NewsSentimentAnalyzer:
             return age < self.cache_duration['short_term']
         return age < self.cache_duration['long_term']
     
+    def _parse_datetime(self, date_str: str) -> Optional[datetime]:
+        """Parse datetime string from API response"""
+        try:
+            # Try parsing with milliseconds
+            return datetime.strptime(date_str.split('.')[0], '%Y-%m-%dT%H:%M:%S')
+        except (ValueError, AttributeError):
+            try:
+                # Try parsing without milliseconds
+                return datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%SZ')
+            except (ValueError, AttributeError):
+                logger.warning(f"Could not parse datetime: {date_str}")
+                return None
+    
     def get_news_sentiment(self, symbol: str, lookback_days: int = 3) -> Optional[Dict]:
         """
         Get news sentiment for a symbol with caching and rate limiting
@@ -148,9 +161,12 @@ class NewsSentimentAnalyzer:
                     strength = 'strong ' + ('positive' if avg_sentiment > 0 else 'negative')
                 
                 # Calculate recent sentiment (last 24h)
-                recent_articles = [a for a in articles if 
-                                 datetime.strptime(a.get('publishDate', ''), '%Y-%m-%dT%H:%M:%SZ') > 
-                                 datetime.now() - timedelta(days=1)]
+                recent_articles = []
+                for article in articles:
+                    pub_date = self._parse_datetime(article.get('publishDate', ''))
+                    if pub_date and pub_date > datetime.now() - timedelta(days=1):
+                        recent_articles.append(article)
+                
                 recent_sentiment = avg_sentiment if recent_articles else 0
                 
                 result = {
