@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import logging
 import time
 from dotenv import load_dotenv
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -16,12 +17,13 @@ class NewsSentimentAnalyzer:
     """
     
     def __init__(self):
-        """Initialize the news sentiment analyzer"""
-        self.api_key = os.getenv('FINLIGHT_API_KEY')
-        self.base_url = 'https://api.finlight.me/v1'
+        """Initialize the news sentiment analyzer with API configuration"""
+        self.api_url = "https://api.finlight.me/v1/articles"
+        self.api_key = settings.FINLIGHT_API_KEY
         self.cache = {}
-        self.daily_calls = 0
+        self.api_calls = 0
         self.last_reset = datetime.now()
+        self.daily_calls = 0
         self.max_daily_calls = 166  # ~5,000/30 days for free tier
         
         # Cache configuration
@@ -31,7 +33,7 @@ class NewsSentimentAnalyzer:
         }
         
         if not self.api_key:
-            logger.error("No FINLIGHT_API_KEY found in environment variables")
+            logger.error("No Finlight API key found in configuration")
         else:
             logger.info("Finlight API key loaded successfully")
     
@@ -77,6 +79,30 @@ class NewsSentimentAnalyzer:
                 logger.warning(f"Could not parse datetime: {date_str}")
                 return None
     
+    def _analyze_article_sentiment(self, article: Dict) -> float:
+        """Analyze sentiment of a single article using title and summary"""
+        text = article['title']
+        if article.get('summary'):
+            text += ' ' + article['summary']
+            
+        # Positive keywords
+        positive_words = ['surge', 'jump', 'soar', 'gain', 'rise', 'climb', 'boost', 'bullish', 'upgrade', 
+                         'growth', 'profit', 'success', 'positive', 'strong', 'beat', 'exceed', 'outperform']
+        
+        # Negative keywords
+        negative_words = ['fall', 'drop', 'decline', 'slip', 'tumble', 'crash', 'bearish', 'downgrade',
+                         'loss', 'weak', 'risk', 'threat', 'miss', 'below', 'underperform', 'warning']
+        
+        text = text.lower()
+        positive_count = sum(1 for word in positive_words if word in text)
+        negative_count = sum(1 for word in negative_words if word in text)
+        
+        if positive_count > negative_count:
+            return 1.0
+        elif negative_count > positive_count:
+            return -1.0
+        return 0.0
+
     def get_news_sentiment(self, symbol: str, lookback_days: int = 3) -> Optional[Dict]:
         """
         Get news sentiment for a symbol with caching and rate limiting
@@ -95,29 +121,34 @@ class NewsSentimentAnalyzer:
         
         # Check API limits
         if not self._can_make_api_call():
-            logger.warning(f"API call limit reached for today. Using cached data if available.")
-            return self.cache.get(cache_key, {}).get('data', self._get_default_sentiment())
-        
+            logger.warning(f"API rate limit reached, using default sentiment for {symbol}")
+            return self._handle_rate_limit(cache_key)
+            
         try:
             # Calculate date range
             end_date = datetime.now()
             start_date = end_date - timedelta(days=lookback_days)
             
-            # Make API request for articles
-            headers = {'X-API-KEY': self.api_key}
+            # Format dates for API
+            start_str = start_date.strftime('%Y-%m-%d')
+            end_str = end_date.strftime('%Y-%m-%d')
+            
+            # Make API request
             params = {
                 'query': symbol,
-                'from': start_date.strftime('%Y-%m-%d'),
-                'to': end_date.strftime('%Y-%m-%d'),
+                'from': start_str,
+                'to': end_str,
                 'language': 'en',
                 'pageSize': 20,
                 'order': 'DESC'
             }
             
+            logger.info(f"Making Finlight API request for {symbol}")
+            
             response = requests.get(
-                f"{self.base_url}/articles",
-                headers=headers,
+                self.api_url,
                 params=params,
+                headers={'X-API-KEY': self.api_key},
                 timeout=10
             )
             
@@ -127,59 +158,42 @@ class NewsSentimentAnalyzer:
                 articles_data = response.json()
                 articles = articles_data.get('articles', [])
                 
+                logger.info(f"Retrieved {len(articles)} articles for {symbol}")
+                
                 # Calculate sentiment metrics
                 total_articles = len(articles)
                 if total_articles == 0:
+                    logger.warning(f"No articles found for {symbol}")
                     return self._get_default_sentiment()
                 
-                # Process sentiment from articles
-                positive_count = sum(1 for a in articles if a.get('sentiment') == 'positive')
-                negative_count = sum(1 for a in articles if a.get('sentiment') == 'negative')
-                neutral_count = sum(1 for a in articles if a.get('sentiment') == 'neutral')
+                # Calculate sentiment scores
+                sentiments = [self._analyze_article_sentiment(article) for article in articles]
+                positive_count = sum(1 for s in sentiments if s > 0)
+                negative_count = sum(1 for s in sentiments if s < 0)
+                neutral_count = sum(1 for s in sentiments if s == 0)
                 
-                # Calculate sentiment score (-1 to 1)
-                sentiment_scores = []
-                for article in articles:
-                    sentiment = article.get('sentiment')
-                    confidence = article.get('confidence', 0.5)
-                    
-                    if sentiment == 'positive':
-                        sentiment_scores.append(confidence)
-                    elif sentiment == 'negative':
-                        sentiment_scores.append(-confidence)
-                    else:
-                        sentiment_scores.append(0)
-                
-                avg_sentiment = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0
+                # Calculate final sentiment score (-1 to 1)
+                sentiment_score = sum(sentiments) / len(sentiments)
                 
                 # Determine sentiment strength
-                if abs(avg_sentiment) < 0.2:
+                if abs(sentiment_score) < 0.2:
                     strength = 'neutral'
-                elif abs(avg_sentiment) < 0.5:
-                    strength = 'weak ' + ('positive' if avg_sentiment > 0 else 'negative')
+                elif abs(sentiment_score) < 0.5:
+                    strength = 'weak_positive' if sentiment_score > 0 else 'weak_negative'
                 else:
-                    strength = 'strong ' + ('positive' if avg_sentiment > 0 else 'negative')
+                    strength = 'strong_positive' if sentiment_score > 0 else 'strong_negative'
                 
-                # Calculate recent sentiment (last 24h)
-                recent_articles = []
-                for article in articles:
-                    pub_date = self._parse_datetime(article.get('publishDate', ''))
-                    if pub_date and pub_date > datetime.now() - timedelta(days=1):
-                        recent_articles.append(article)
-                
-                recent_sentiment = avg_sentiment if recent_articles else 0
-                
+                # Create result with all required fields
                 result = {
-                    'sentiment_score': avg_sentiment,
+                    'sentiment_score': sentiment_score,
                     'sentiment_strength': strength,
                     'news_count': total_articles,
-                    'positive_ratio': positive_count / total_articles,
-                    'negative_ratio': negative_count / total_articles,
-                    'news_volume': total_articles,
-                    'recent_sentiment': recent_sentiment
+                    'positive_count': positive_count,
+                    'negative_count': negative_count,
+                    'neutral_count': neutral_count,
+                    'timestamp': time.time()
                 }
                 
-                # Cache the results
                 self.cache[cache_key] = {
                     'data': result,
                     'timestamp': time.time(),
@@ -188,15 +202,12 @@ class NewsSentimentAnalyzer:
                 
                 return result
                 
-            elif response.status_code == 429:  # Rate limit
-                logger.warning(f"Rate limit reached for Finlight API")
-                return self._handle_rate_limit(cache_key)
             else:
-                logger.error(f"Error fetching news for {symbol}: {response.status_code}")
+                logger.error(f"API request failed with status {response.status_code}")
                 return self._handle_error(cache_key)
                 
         except Exception as e:
-            logger.error(f"Error in news sentiment analysis for {symbol}: {str(e)}")
+            logger.error(f"Error getting news sentiment for {symbol}: {str(e)}")
             return self._handle_error(cache_key)
     
     def _handle_rate_limit(self, cache_key: str) -> Dict:
@@ -207,21 +218,36 @@ class NewsSentimentAnalyzer:
         return self._get_default_sentiment()
     
     def _handle_error(self, cache_key: str) -> Dict:
-        """Handle errors by returning cached data or default values"""
-        if cache_key in self.cache:
-            return self.cache[cache_key]['data']
-        return self._get_default_sentiment()
+        """Handle API errors by returning default sentiment and caching it briefly"""
+        result = {
+            'sentiment_score': 0.0,
+            'sentiment_strength': 'neutral',
+            'news_count': 0,
+            'positive_count': 0,
+            'negative_count': 0,
+            'neutral_count': 0,
+            'timestamp': time.time()
+        }
+        
+        # Cache error result for a short time
+        self.cache[cache_key] = {
+            'data': result,
+            'timestamp': time.time(),
+            'lookback_days': 1  # Short cache for errors
+        }
+        
+        return result
     
     def _get_default_sentiment(self) -> Dict:
-        """Return default sentiment values when no data is available"""
+        """Return default sentiment when no data is available"""
         return {
             'sentiment_score': 0.0,
             'sentiment_strength': 'neutral',
             'news_count': 0,
-            'positive_ratio': 0.5,
-            'negative_ratio': 0.5,
-            'news_volume': 0,
-            'recent_sentiment': 0.0
+            'positive_count': 0,
+            'negative_count': 0,
+            'neutral_count': 0,
+            'timestamp': time.time()
         }
     
     def get_api_usage(self) -> Dict:

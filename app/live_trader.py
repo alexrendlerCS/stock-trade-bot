@@ -12,6 +12,8 @@ import sqlite3
 import os
 import pytz
 from .core.config import settings
+import alpaca_trade_api as tradeapi
+from alpaca_trade_api.rest import REST
 
 # Set up logging
 logging.basicConfig(
@@ -67,10 +69,20 @@ class LiveTradingBot:
         self.risk_per_trade = risk_per_trade
         self.confidence_threshold = confidence_threshold
         
+        # Initialize Alpaca API
+        self.api = REST(
+            key_id=settings.ALPACA_API_KEY,
+            secret_key=settings.ALPACA_SECRET_KEY,
+            base_url=settings.ALPACA_BASE_URL
+        )
+        
+        # Get initial account info
+        account = self.api.get_account()
+        self.portfolio_value = float(account.portfolio_value)
+        
         # Initialize components
         self.ml_predictor = MLPredictor()
-        self.positions: Dict[str, Position] = {}
-        self.portfolio_value = 100000.0 if paper_trading else self._get_account_balance()
+        self.positions = {}
         
         # Database for trade history
         self._init_database()
@@ -193,14 +205,26 @@ class LiveTradingBot:
                 confidence = prob_3d_up
                 target_price = current_price * 1.03  # 3% target
                 stop_loss = current_price * 0.98     # 2% stop loss
+                logger.info(f"Strong LONG signal detected for {symbol}:")
+                logger.info(f"  - 3-day Up Probability: {prob_3d_up:.3f}")
+                logger.info(f"  - Sentiment Score: {sentiment_score:.3f}")
+                logger.info(f"  - Combined Confidence: {confidence:.3f}")
                 
             elif prob_3d_down > self.confidence_threshold:
                 direction = 'SHORT'
                 confidence = prob_3d_down
                 target_price = current_price * 0.97  # 3% target (price going down)
                 stop_loss = current_price * 1.02     # 2% stop loss
+                logger.info(f"Strong SHORT signal detected for {symbol}:")
+                logger.info(f"  - 3-day Down Probability: {prob_3d_down:.3f}")
+                logger.info(f"  - Sentiment Score: {sentiment_score:.3f}")
+                logger.info(f"  - Combined Confidence: {confidence:.3f}")
                 
             else:
+                logger.info(f"No trade signal for {symbol}:")
+                logger.info(f"  - 3-day Up Probability: {prob_3d_up:.3f}")
+                logger.info(f"  - 3-day Down Probability: {prob_3d_down:.3f}")
+                logger.info(f"  - Required Threshold: {self.confidence_threshold:.3f}")
                 return None  # No strong signal
             
             # Enhance signal with sentiment
@@ -274,18 +298,23 @@ class LiveTradingBot:
         try:
             # Check if we already have a position in this symbol
             if signal.symbol in self.positions:
-                logger.info(f"Already have position in {signal.symbol}, skipping")
+                logger.info(f"❌ Trade rejected - Already have position in {signal.symbol}")
+                logger.info(f"  Current position: {self.positions[signal.symbol].direction}")
+                logger.info(f"  Entry price: ${self.positions[signal.symbol].entry_price:.2f}")
                 return False
             
             # Check position limits
             if len(self.positions) >= self.max_positions:
-                logger.info(f"Maximum positions ({self.max_positions}) reached, skipping")
+                logger.info(f"❌ Trade rejected - Maximum positions ({self.max_positions}) reached")
+                logger.info(f"  Current positions: {list(self.positions.keys())}")
                 return False
             
             # Calculate position size
             quantity = self.calculate_position_size(signal)
             if quantity == 0:
-                logger.warning(f"Position size calculation returned 0 for {signal.symbol}")
+                logger.info(f"❌ Trade rejected - Position size calculation returned 0 for {signal.symbol}")
+                logger.info(f"  Entry price: ${signal.entry_price:.2f}")
+                logger.info(f"  Available capital: ${self.portfolio_value:.2f}")
                 return False
             
             # Execute trade
@@ -324,15 +353,25 @@ class LiveTradingBot:
             return False
     
     def _execute_paper_trade(self, signal: TradeSignal, quantity: int) -> bool:
-        """Execute a paper trade (simulation)"""
-        trade_value = signal.entry_price * quantity
-        
-        if signal.direction == 'LONG':
-            self.portfolio_value -= trade_value
-        # For SHORT positions in paper trading, we'll assume we can short without additional capital requirements
-        
-        logger.info(f"📝 Paper trade executed: {signal.direction} {signal.symbol} x{quantity}")
-        return True
+        """Execute a paper trade through Alpaca"""
+        try:
+            side = 'buy' if signal.direction == 'LONG' else 'sell'
+            
+            # Submit order to Alpaca
+            self.api.submit_order(
+                symbol=signal.symbol,
+                qty=quantity,
+                side=side,
+                type='market',
+                time_in_force='day'
+            )
+            
+            logger.info(f"📝 Paper trade submitted to Alpaca: {signal.direction} {signal.symbol} x{quantity}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error executing paper trade: {str(e)}")
+            return False
     
     def _execute_real_trade(self, signal: TradeSignal, quantity: int) -> bool:
         """Execute a real trade through broker API"""
@@ -342,59 +381,55 @@ class LiveTradingBot:
     
     def check_positions(self):
         """Check existing positions for exit signals"""
-        positions_to_close = []
-        
-        for symbol, position in self.positions.items():
-            try:
-                # Get current price
-                current_data = self.get_live_data(symbol, period='1d')
-                if current_data is None:
-                    continue
-                
-                current_price = current_data['close'].iloc[-1]
-                position.current_price = current_price
-                
-                # Calculate unrealized PnL
-                if position.direction == 'LONG':
-                    position.unrealized_pnl = (current_price - position.entry_price) * position.quantity
-                else:  # SHORT
-                    position.unrealized_pnl = (position.entry_price - current_price) * position.quantity
-                
-                # Check exit conditions
-                should_exit = False
-                exit_reason = ""
-                
-                if position.direction == 'LONG':
-                    if current_price >= position.target_price:
-                        should_exit = True
-                        exit_reason = "Target reached"
-                    elif current_price <= position.stop_loss:
-                        should_exit = True
-                        exit_reason = "Stop loss hit"
-                else:  # SHORT
-                    if current_price <= position.target_price:
-                        should_exit = True
-                        exit_reason = "Target reached"
-                    elif current_price >= position.stop_loss:
-                        should_exit = True
-                        exit_reason = "Stop loss hit"
-                
-                # Also check time-based exit (hold for max 3 days)
-                if (datetime.now() - position.entry_time).days >= 3:
-                    should_exit = True
-                    exit_reason = "Time limit reached"
-                
-                if should_exit:
-                    positions_to_close.append((symbol, exit_reason))
+        try:
+            # Get all positions from Alpaca
+            alpaca_positions = {p.symbol: p for p in self.api.list_positions()}
+            
+            for symbol, position in list(self.positions.items()):
+                try:
+                    # Get current position from Alpaca
+                    alpaca_pos = alpaca_positions.get(symbol)
+                    if alpaca_pos is None:
+                        continue
+                        
+                    current_price = float(alpaca_pos.current_price)
+                    position.current_price = current_price
+                    position.unrealized_pnl = float(alpaca_pos.unrealized_pl)
                     
-                logger.info(f"Position {symbol}: ${current_price:.2f} (P&L: ${position.unrealized_pnl:.2f})")
-                
-            except Exception as e:
-                logger.error(f"Error checking position {symbol}: {str(e)}")
-        
-        # Close positions that need to be closed
-        for symbol, reason in positions_to_close:
-            self.close_position(symbol, reason)
+                    # Check exit conditions
+                    should_exit = False
+                    exit_reason = ""
+                    
+                    if position.direction == 'LONG':
+                        if current_price >= position.target_price:
+                            should_exit = True
+                            exit_reason = "Target reached"
+                        elif current_price <= position.stop_loss:
+                            should_exit = True
+                            exit_reason = "Stop loss hit"
+                    else:  # SHORT
+                        if current_price <= position.target_price:
+                            should_exit = True
+                            exit_reason = "Target reached"
+                        elif current_price >= position.stop_loss:
+                            should_exit = True
+                            exit_reason = "Stop loss hit"
+                    
+                    # Also check time-based exit (hold for max 3 days)
+                    if (datetime.now() - position.entry_time).days >= 3:
+                        should_exit = True
+                        exit_reason = "Time limit reached"
+                    
+                    if should_exit:
+                        self.close_position(symbol, exit_reason)
+                    else:
+                        logger.info(f"Position {symbol}: ${current_price:.2f} (P&L: ${position.unrealized_pnl:.2f})")
+                    
+                except Exception as e:
+                    logger.error(f"Error checking position {symbol}: {str(e)}")
+            
+        except Exception as e:
+            logger.error(f"Error checking positions: {str(e)}")
     
     def close_position(self, symbol: str, reason: str = "Manual"):
         """Close a position"""
@@ -404,24 +439,27 @@ class LiveTradingBot:
                 return
             
             position = self.positions[symbol]
-            exit_price = position.current_price
+            
+            # Close position through Alpaca
+            self.api.close_position(symbol)
+            
+            # Get the exit price from the last trade
+            trades = self.api.get_trades(symbol, limit=1)
+            if trades:
+                exit_price = float(trades[0].price)
+            else:
+                exit_price = position.current_price
             
             # Calculate final PnL
             if position.direction == 'LONG':
                 pnl = (exit_price - position.entry_price) * position.quantity
-                # Update portfolio value for paper trading
-                if self.paper_trading:
-                    self.portfolio_value += exit_price * position.quantity
             else:  # SHORT
                 pnl = (position.entry_price - exit_price) * position.quantity
-                # For short positions in paper trading, add back the original trade value plus profit
-                if self.paper_trading:
-                    self.portfolio_value += position.entry_price * position.quantity + pnl
             
             # Update database
             self._update_trade_in_db(symbol, exit_price, pnl)
             
-            # Remove position
+            # Remove position from local tracking
             del self.positions[symbol]
             
             logger.info(f"✅ Closed {position.direction} position: {symbol} @ ${exit_price:.2f} | P&L: ${pnl:.2f} | Reason: {reason}")

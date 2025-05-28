@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     ALPACA_SECRET_KEY: str = os.getenv("ALPACA_SECRET_KEY", "")
     ALPACA_BASE_URL: str = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
     
+    # News API Configuration
+    FINLIGHT_API_KEY: str = os.getenv("FINLIGHT_API_KEY", "")
+    NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
+    
     # Database Configuration
     DATABASE_URL: str = "sqlite:///./trading_bot.db"
     
