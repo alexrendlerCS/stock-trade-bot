@@ -1,5 +1,19 @@
 import sys
 import os
+import asyncio
+import logging
+
+# Configure logging
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)  # Suppress yfinance errors
+logging.getLogger('huggingface_hub').setLevel(logging.WARNING)  # Reduce HF warnings
+
+# Fix for asyncio on Windows with Python 3.13
+if sys.platform == "win32" and sys.version_info >= (3, 13):
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except:
+        pass
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import streamlit as st
 import pandas as pd
@@ -10,9 +24,8 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import re
 import json
-
-# Set pandas option to avoid FutureWarnings
-pd.set_option('future.no_silent_downcasting', True)
+import yfinance as yf
+import time
 
 # Import our enhanced components
 try:
@@ -129,14 +142,12 @@ if not market_open:
         <p><strong>Current Time:</strong> {now.strftime('%A, %B %d, %Y at %I:%M %p')}</p>
         <p><strong>📅 Market Status:</strong> Closed until Monday 9:30 AM ET</p>
         
-        <h4>✨ Available Features:</h4>
-        <ul>
-            <li><span class="emoji">🧪</span><strong>Test ML Predictions</strong> - Analyze any stock symbol with our 61% accuracy models</li>
-            <li><span class="emoji">📰</span><strong>Live News Sentiment</strong> - Real-time FinBERT analysis of financial news</li>
-            <li><span class="emoji">📊</span><strong>Historical Performance</strong> - Review past trading results and strategies</li>
-            <li><span class="emoji">⚙️</span><strong>Configure Settings</strong> - Adjust confidence thresholds and risk parameters</li>
-            <li><span class="emoji">🎯</span><strong>Plan for Monday</strong> - Prepare your trading strategy for market open</li>
-        </ul>
+        <p><strong>✨ Available Features:</strong></p>
+        <p>🧪 <strong>Test ML Predictions</strong> - Analyze any stock symbol with our 61% accuracy models</p>
+        <p>📰 <strong>Live News Sentiment</strong> - Real-time FinBERT analysis of financial news</p>
+        <p>📊 <strong>Historical Performance</strong> - Review past trading results and strategies</p>
+        <p>⚙️ <strong>Configure Settings</strong> - Adjust confidence thresholds and risk parameters</p>
+        <p>🎯 <strong>Plan for Monday</strong> - Prepare your trading strategy for market open</p>
         
         <p><strong>💡 Tip:</strong> Use the sidebar to test live signals and analyze market sentiment!</p>
     </div>
@@ -248,22 +259,44 @@ def load_positions():
         # Don't show error for missing positions - it's normal
         return pd.DataFrame()
 
-# Real-time ML predictions - FIXED YFINANCE COLUMN HANDLING
+# Add retry logic for yfinance with exponential backoff
+def download_with_retry(symbol, max_retries=5):
+    """Download data with retry logic and exponential backoff"""
+    for attempt in range(max_retries):
+        try:
+            # Disable progress bar to reduce console spam
+            df = yf.download(
+                symbol,
+                period='60d',
+                auto_adjust=False,
+                progress=False
+            )
+            if not df.empty:
+                return df
+        except Exception as e:
+            wait_time = (2 ** attempt)  # Exponential backoff
+            if attempt < max_retries - 1:  # don't sleep on the last attempt
+                time.sleep(wait_time)
+            continue
+    return None
+
+# Modify get_live_predictions function
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_live_predictions(symbols):
     """Get live ML predictions for symbols"""
     predictor = MLPredictor()
     predictions = {}
     
-    for symbol in symbols:
-        try:
-            import yfinance as yf
-            df = yf.download(symbol, period='60d', auto_adjust=False)
-            
-            if not df.empty:
+    with st.spinner("Loading market data..."):
+        for symbol in symbols:
+            try:
+                df = download_with_retry(symbol)
+                if df is None:
+                    st.warning(f"Could not download data for {symbol}, skipping...")
+                    continue
+                    
                 # FIXED: Proper handling of MultiIndex columns from yfinance
                 if isinstance(df.columns, pd.MultiIndex):
-                    # Flatten MultiIndex columns
                     df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col for col in df.columns]
                 
                 # Convert all column names to lowercase
@@ -294,41 +327,37 @@ def get_live_predictions(symbols):
                     st.warning(f"Missing columns for {symbol}: {missing_cols}")
                     continue
                 
-                # Get prediction with sentiment
-                pred = predictor.predict(df, symbol=symbol)
+                # Get prediction without sentiment for now
+                pred = predictor.predict(df)
                 if pred:
                     predictions[symbol] = {
                         '3d_up': pred['3d'][0],
                         '3d_down': pred['3d'][1],
                         '5d_up': pred['5d'][0],
                         '5d_down': pred['5d'][1],
-                        'sentiment': pred.get('sentiment', {}),
                         'current_price': df['close'].iloc[-1]
                     }
-        except Exception as e:
-            st.warning(f"Could not get prediction for {symbol}: {str(e)}")
+            except Exception as e:
+                st.warning(f"Could not get prediction for {symbol}: {str(e)}")
     
     return predictions
 
-# News sentiment analysis
+# Modify get_sentiment_analysis function to return dummy data
 @st.cache_data(ttl=900)  # Cache for 15 minutes
 def get_sentiment_analysis(symbols):
-    """Get news sentiment for symbols"""
-    try:
-        analyzer = NewsSentimentAnalyzer()
-        sentiment_data = {}
-        
-        for symbol in symbols:
-            try:
-                sentiment = analyzer.get_news_sentiment(symbol, lookback_days=5)
-                sentiment_data[symbol] = sentiment
-            except Exception as e:
-                st.warning(f"Could not get sentiment for {symbol}: {e}")
-        
-        return sentiment_data
-    except Exception as e:
-        st.warning(f"News sentiment analyzer not available: {e}")
-        return {}
+    """Get news sentiment for symbols (temporarily disabled)"""
+    sentiment_data = {}
+    for symbol in symbols:
+        sentiment_data[symbol] = {
+            'sentiment_score': 0.0,
+            'news_count': 0,
+            'sentiment_strength': 'neutral',
+            'positive_ratio': 0.5,
+            'negative_ratio': 0.5,
+            'news_volume': 0,
+            'recent_sentiment': 0.0
+        }
+    return sentiment_data
 
 # Main dashboard layout
 portfolio_data = load_portfolio_summary()
@@ -486,26 +515,79 @@ if portfolio_data:
         with col1:
             st.subheader("💰 Trade History")
             
-            # If we have valid timestamps, show a timeline
+            # If we have valid timestamps, show P&L performance
             if trades_df['entry_time'].notna().any():
-                # Create a simple trade timeline
                 trade_timeline = trades_df.dropna(subset=['entry_time']).copy()
-                trade_timeline['trade_number'] = range(1, len(trade_timeline) + 1)
-                trade_timeline['pnl_clean'] = trade_timeline['pnl'].fillna(0)
+                trade_timeline = trade_timeline.sort_values('entry_time')
+                trade_timeline['pnl_clean'] = pd.to_numeric(trade_timeline['pnl'], errors='coerce').fillna(0)
+                trade_timeline['cumulative_pnl'] = trade_timeline['pnl_clean'].cumsum()
                 
-                if len(trade_timeline) > 1:
-                    fig = px.line(
-                        trade_timeline, 
-                        x='entry_time', 
-                        y='trade_number',
-                        title="Trade Timeline",
-                        markers=True,
-                        hover_data=['symbol', 'strategy_type', 'pnl_clean']
+                if len(trade_timeline) > 0:
+                    # Show cumulative P&L over time
+                    fig = go.Figure()
+                    
+                    # Add cumulative P&L line
+                    fig.add_trace(go.Scatter(
+                        x=trade_timeline['entry_time'],
+                        y=trade_timeline['cumulative_pnl'],
+                        mode='lines+markers',
+                        name='Cumulative P&L',
+                        line=dict(color='#00ff88', width=3),
+                        marker=dict(size=8),
+                        hovertemplate='<b>Date:</b> %{x}<br>' +
+                                    '<b>Cumulative P&L:</b> $%{y:.2f}<br>' +
+                                    '<extra></extra>'
+                    ))
+                    
+                    # Add individual trade P&L as bars
+                    colors = ['#00ff88' if pnl >= 0 else '#ff4444' for pnl in trade_timeline['pnl_clean']]
+                    fig.add_trace(go.Bar(
+                        x=trade_timeline['entry_time'],
+                        y=trade_timeline['pnl_clean'],
+                        name='Individual Trade P&L',
+                        marker_color=colors,
+                        opacity=0.7,
+                        hovertemplate='<b>Symbol:</b> %{customdata[0]}<br>' +
+                                    '<b>Strategy:</b> %{customdata[1]}<br>' +
+                                    '<b>P&L:</b> $%{y:.2f}<br>' +
+                                    '<b>Date:</b> %{x}<br>' +
+                                    '<extra></extra>',
+                        customdata=list(zip(trade_timeline['symbol'], trade_timeline['strategy_type']))
+                    ))
+                    
+                    # Add zero line
+                    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                    
+                    fig.update_layout(
+                        title="Portfolio P&L Performance",
+                        xaxis_title="Date",
+                        yaxis_title="P&L ($)",
+                        height=400,
+                        hovermode='x unified',
+                        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
                     )
-                    fig.update_layout(height=400)
                     st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Show additional P&L insights
+                    if trade_timeline['pnl_clean'].abs().sum() > 0:  # If there's actual P&L data
+                        total_pnl = trade_timeline['pnl_clean'].sum()
+                        winning_trades = (trade_timeline['pnl_clean'] > 0).sum()
+                        losing_trades = (trade_timeline['pnl_clean'] < 0).sum()
+                        avg_win = trade_timeline[trade_timeline['pnl_clean'] > 0]['pnl_clean'].mean() if winning_trades > 0 else 0
+                        avg_loss = trade_timeline[trade_timeline['pnl_clean'] < 0]['pnl_clean'].mean() if losing_trades > 0 else 0
+                        
+                        st.markdown(f"""
+                        **📈 P&L Summary:**
+                        - **Total P&L:** ${total_pnl:.2f}
+                        - **Winning Trades:** {winning_trades} (Avg: ${avg_win:.2f})
+                        - **Losing Trades:** {losing_trades} (Avg: ${avg_loss:.2f})
+                        - **Best Trade:** ${trade_timeline['pnl_clean'].max():.2f}
+                        - **Worst Trade:** ${trade_timeline['pnl_clean'].min():.2f}
+                        """)
+                    else:
+                        st.info("📊 All trades show $0.00 P&L - this is normal for paper trading or if trades haven't been closed yet.")
                 else:
-                    st.info("Need more trades to show timeline chart")
+                    st.info("No valid trade data for P&L chart")
             else:
                 st.info("No valid trade timestamps for chart")
         
@@ -518,17 +600,51 @@ if portfolio_data:
             executed_trades = (trades_df['status'] == 'EXECUTED').sum()
             closed_trades = (trades_df['status'] == 'CLOSED').sum()
             
-            st.metric("Total Trades", total_trades)
-            st.metric("Open Trades", open_trades)
-            st.metric("Executed Trades", executed_trades)
-            st.metric("Closed Trades", closed_trades)
+            # Calculate P&L metrics
+            trades_df['pnl_numeric'] = pd.to_numeric(trades_df['pnl'], errors='coerce').fillna(0)
+            total_pnl = trades_df['pnl_numeric'].sum()
+            
+            # Create metrics display
+            col2a, col2b = st.columns(2)
+            with col2a:
+                st.metric("Total Trades", total_trades)
+                st.metric("Open Trades", open_trades)
+                
+            with col2b:
+                st.metric("Executed Trades", executed_trades)
+                st.metric("Closed Trades", closed_trades)
+            
+            # P&L breakdown
+            if trades_df['pnl_numeric'].abs().sum() > 0:
+                winning_trades = (trades_df['pnl_numeric'] > 0).sum()
+                losing_trades = (trades_df['pnl_numeric'] < 0).sum()
+                breakeven_trades = (trades_df['pnl_numeric'] == 0).sum()
+                
+                # Create a simple P&L breakdown chart
+                pnl_breakdown = pd.DataFrame({
+                    'Type': ['Winning', 'Losing', 'Breakeven'],
+                    'Count': [winning_trades, losing_trades, breakeven_trades],
+                    'Color': ['#00ff88', '#ff4444', '#888888']
+                })
+                
+                if pnl_breakdown['Count'].sum() > 0:
+                    fig_pie = px.pie(
+                        pnl_breakdown, 
+                        values='Count', 
+                        names='Type',
+                        title="Trade Outcome Distribution",
+                        color_discrete_map={'Winning': '#00ff88', 'Losing': '#ff4444', 'Breakeven': '#888888'}
+                    )
+                    fig_pie.update_layout(height=300)
+                    st.plotly_chart(fig_pie, use_container_width=True)
             
             # Show symbols traded
             if 'symbol' in trades_df.columns:
                 symbols_traded = trades_df['symbol'].value_counts()
-                st.write("**Symbols Traded:**")
+                st.write("**📊 Symbols Traded:**")
                 for symbol, count in symbols_traded.items():
-                    st.write(f"- {symbol}: {count} trades")
+                    symbol_pnl = trades_df[trades_df['symbol'] == symbol]['pnl_numeric'].sum()
+                    st.write(f"- {symbol}: {count} trades (P&L: ${symbol_pnl:.2f})")
         
         # Recent trades table
         st.subheader("📈 Recent Trades")

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from .ml_predictor import MLPredictor
 import sqlite3
 import os
+import pytz
+from .core.config import settings
 
 # Set up logging
 logging.basicConfig(
@@ -121,17 +123,28 @@ class LiveTradingBot:
     
     def is_market_open(self) -> bool:
         """Check if US stock market is currently open"""
-        now = datetime.now()
+        # Get current time in Eastern Time
+        et_tz = pytz.timezone(settings.TIMEZONE)
+        now = datetime.now(et_tz)
         
         # Check if it's a weekday (Monday = 0, Sunday = 6)
         if now.weekday() >= 5:  # Saturday or Sunday
+            logger.info("Market is closed (Weekend)")
             return False
         
         # Market hours: 9:30 AM - 4:00 PM ET
         market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
         market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
         
-        return market_open <= now <= market_close
+        if now < market_open:
+            logger.info("Market is not open yet")
+            return False
+        elif now > market_close:
+            logger.info("Market is closed for the day")
+            return False
+        
+        logger.info("Market is open")
+        return True
     
     def get_live_data(self, symbol: str, period: str = '5d') -> Optional[pd.DataFrame]:
         """Get live market data for a symbol"""

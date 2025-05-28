@@ -6,6 +6,11 @@ from typing import Optional, Dict, Tuple
 import logging
 from dotenv import load_dotenv
 import ta
+import warnings
+from sklearn.exceptions import InconsistentVersionWarning
+
+# Suppress scikit-learn version mismatch warning
+warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
 
 logger = logging.getLogger(__name__)
 load_dotenv()

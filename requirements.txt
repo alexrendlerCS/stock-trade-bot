@@ -1,31 +1,46 @@
-# Requires Python 3.11 for compatibility with pandas and other dependencies
-alpaca-trade-api==3.0.2
+# Core dependencies - Python 3.11 compatible versions
+alpaca-trade-api==3.2.0
 fastapi==0.104.1
 uvicorn==0.24.0
 sqlalchemy==2.0.23
 python-dotenv==1.0.0
-pandas==2.1.3
-numpy==1.26.2
+
+# Data processing and ML
+pandas==2.1.4
+numpy==1.24.3
 scikit-learn==1.3.2
 ta==0.10.2
+
+# Scheduling
 apscheduler==3.10.4
+schedule==1.2.1
+
+# Testing
 pytest==7.4.3
+
+# Authentication
 python-jose==3.3.0
 passlib==1.7.4
 python-multipart==0.0.6
+
+# HTTP and utilities
 requests==2.31.0
-pytz==2023.3
-streamlit==1.35.0
-pydantic-settings
-yfinance
-matplotlib>=3.7.1
-seaborn>=0.12.2
+pytz==2024.1
+
+# Web interface
+streamlit==1.29.0
+pydantic-settings==2.1.0
+
+# Market data
+yfinance==0.2.35
+
+# Visualization
+matplotlib==3.7.3
+seaborn==0.13.0
+plotly==5.18.0
+
+# News and sentiment analysis
 newsapi-python==0.2.7
-transformers==4.36.2
-torch
-torchvision
-torchaudio
-# New dependencies for enhanced trading bot
-schedule>=1.2.0
-plotly>=5.17.0
+transformers==4.35.2
+torch==2.1.2
 tqdm>=4.66.0 
