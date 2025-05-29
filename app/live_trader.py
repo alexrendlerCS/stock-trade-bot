@@ -368,7 +368,7 @@ class LiveTradingBot:
             
             logger.info(f"Paper trade submitted to Alpaca: {signal.direction} {signal.symbol} x{quantity}")
             return True
-            
+        
         except Exception as e:
             logger.error(f"Error executing paper trade: {str(e)}")
             return False
@@ -384,22 +384,22 @@ class LiveTradingBot:
         try:
             # Get all positions from Alpaca
             alpaca_positions = {p.symbol: p for p in self.api.list_positions()}
-            
+        
             for symbol, position in list(self.positions.items()):
                 try:
                     # Get current position from Alpaca
                     alpaca_pos = alpaca_positions.get(symbol)
                     if alpaca_pos is None:
                         continue
-                        
+                
                     current_price = float(alpaca_pos.current_price)
                     position.current_price = current_price
                     position.unrealized_pnl = float(alpaca_pos.unrealized_pl)
-                    
+                
                     # Check exit conditions
                     should_exit = False
                     exit_reason = ""
-                    
+                
                     if position.direction == 'LONG':
                         if current_price >= position.target_price:
                             should_exit = True
@@ -414,20 +414,20 @@ class LiveTradingBot:
                         elif current_price >= position.stop_loss:
                             should_exit = True
                             exit_reason = "Stop loss hit"
-                    
+                
                     # Also check time-based exit (hold for max 3 days)
                     if (datetime.now() - position.entry_time).days >= 3:
                         should_exit = True
                         exit_reason = "Time limit reached"
-                    
+                
                     if should_exit:
                         self.close_position(symbol, exit_reason)
                     else:
                         logger.info(f"Position {symbol}: ${current_price:.2f} (P&L: ${position.unrealized_pnl:.2f})")
-                    
+                
                 except Exception as e:
                     logger.error(f"Error checking position {symbol}: {str(e)}")
-            
+        
         except Exception as e:
             logger.error(f"Error checking positions: {str(e)}")
     

@@ -288,8 +288,8 @@ def get_live_predictions(symbols):
     predictions = {}
     
     with st.spinner("Loading market data..."):
-        for symbol in symbols:
-            try:
+    for symbol in symbols:
+        try:
                 df = download_with_retry(symbol)
                 if df is None:
                     st.warning(f"Could not download data for {symbol}, skipping...")
@@ -337,8 +337,8 @@ def get_live_predictions(symbols):
                         '5d_down': pred['5d'][1],
                         'current_price': df['close'].iloc[-1]
                     }
-            except Exception as e:
-                st.warning(f"Could not get prediction for {symbol}: {str(e)}")
+        except Exception as e:
+            st.warning(f"Could not get prediction for {symbol}: {str(e)}")
     
     return predictions
 
@@ -346,8 +346,8 @@ def get_live_predictions(symbols):
 @st.cache_data(ttl=900)  # Cache for 15 minutes
 def get_sentiment_analysis(symbols):
     """Get news sentiment for symbols (temporarily disabled)"""
-    sentiment_data = {}
-    for symbol in symbols:
+        sentiment_data = {}
+        for symbol in symbols:
         sentiment_data[symbol] = {
             'sentiment_score': 0.0,
             'news_count': 0,
@@ -357,7 +357,7 @@ def get_sentiment_analysis(symbols):
             'news_volume': 0,
             'recent_sentiment': 0.0
         }
-    return sentiment_data
+        return sentiment_data
 
 # Main dashboard layout
 portfolio_data = load_portfolio_summary()

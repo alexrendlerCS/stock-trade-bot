@@ -173,9 +173,9 @@ class NewsSentimentAnalyzer:
                 neutral_count = sum(1 for s in sentiments if s == 0)
                 
                 # Calculate ratios
-                positive_ratio = positive_count / total_articles if total_articles > 0 else 0
-                negative_ratio = negative_count / total_articles if total_articles > 0 else 0
-                neutral_ratio = neutral_count / total_articles if total_articles > 0 else 0
+                positive_ratio = positive_count / total_articles
+                negative_ratio = negative_count / total_articles
+                neutral_ratio = neutral_count / total_articles
                 
                 # Calculate final sentiment score (-1 to 1)
                 sentiment_score = sum(sentiments) / len(sentiments)
@@ -202,6 +202,7 @@ class NewsSentimentAnalyzer:
                     'timestamp': time.time()
                 }
                 
+                # Cache the result
                 self.cache[cache_key] = {
                     'data': result,
                     'timestamp': time.time(),
@@ -209,11 +210,11 @@ class NewsSentimentAnalyzer:
                 }
                 
                 return result
-                
+            
             else:
                 logger.error(f"API request failed with status {response.status_code}")
                 return self._handle_error(cache_key)
-                
+            
         except Exception as e:
             logger.error(f"Error getting news sentiment for {symbol}: {str(e)}")
             return self._handle_error(cache_key)

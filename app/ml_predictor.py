@@ -132,18 +132,27 @@ class MLPredictor:
         """Get news sentiment features for a symbol"""
         try:
             sentiment_data = self.news_analyzer.get_news_sentiment(symbol, lookback_days=7)
-            
+            if not sentiment_data:
+                logger.warning(f"No sentiment data available for {symbol}")
+                return None
+                
             # Create sentiment features that can enhance predictions
             sentiment_features = {
-                'news_sentiment_score': sentiment_data['sentiment_score'],
-                'news_sentiment_strength': sentiment_data['sentiment_strength'],
-                'news_positive_ratio': sentiment_data['positive_ratio'],
-                'news_negative_ratio': sentiment_data['negative_ratio'],
-                'news_volume': min(sentiment_data['news_volume'] / 50.0, 1.0),  # Normalize to 0-1
-                'recent_sentiment': sentiment_data['recent_sentiment']
+                'news_sentiment_score': float(sentiment_data['sentiment_score']),
+                'news_positive_ratio': float(sentiment_data['positive_ratio']),
+                'news_negative_ratio': float(sentiment_data['negative_ratio']),
+                'news_neutral_ratio': float(sentiment_data['neutral_ratio']),
+                'news_volume': min(float(sentiment_data['news_count']) / 20.0, 1.0),  # Normalize to 0-1 (max 20 articles)
+                'sentiment_strength': float(1.0 if sentiment_data['sentiment_strength'].startswith('strong') else 
+                                         0.5 if sentiment_data['sentiment_strength'].startswith('weak') else 0.0)
             }
             
-            logger.info(f"Generated sentiment features for {symbol}: sentiment={sentiment_data['sentiment_score']:.3f}, volume={sentiment_data['news_volume']}")
+            # Ensure all values are valid floats
+            for key, value in sentiment_features.items():
+                if not isinstance(value, (int, float)) or pd.isna(value):
+                    sentiment_features[key] = 0.0
+            
+            logger.info(f"Generated sentiment features for {symbol}: sentiment={sentiment_data['sentiment_score']:.3f}, volume={sentiment_data['news_count']}")
             return sentiment_features
             
         except Exception as e:
