@@ -14,6 +14,8 @@ import pytz
 from .core.config import settings
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import REST
+from .indicators.advanced_indicators import AdvancedIndicators
+import ta
 
 # Set up logging
 logging.basicConfig(
@@ -83,6 +85,9 @@ class LiveTradingBot:
         # Initialize components
         self.ml_predictor = MLPredictor()
         self.positions = {}
+        
+        # Initialize advanced indicators
+        self.advanced_indicators = AdvancedIndicators()
         
         # Database for trade history
         self._init_database()
@@ -161,8 +166,17 @@ class LiveTradingBot:
     def get_live_data(self, symbol: str, period: str = '5d') -> Optional[pd.DataFrame]:
         """Get live market data for a symbol"""
         try:
+            # Initialize ticker
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval='1d')
+            
+            # Get historical data
+            df = ticker.history(
+                period=period,
+                interval='1d',
+                actions=False,
+                prepost=False,
+                auto_adjust=True
+            )
             
             if df.empty:
                 logger.warning(f"No data available for {symbol}")
@@ -170,6 +184,21 @@ class LiveTradingBot:
             
             # Clean column names
             df.columns = [col.lower() for col in df.columns]
+            
+            # Add basic technical indicators
+            if len(df) > 14:  # Need at least 14 days for some indicators
+                # Add RSI
+                df['rsi'] = ta.momentum.RSIIndicator(df['close']).rsi()
+                # Add MACD
+                macd = ta.trend.MACD(df['close'])
+                df['macd'] = macd.macd()
+                df['macd_signal'] = macd.macd_signal()
+                # Add Bollinger Bands
+                bb = ta.volatility.BollingerBands(df['close'])
+                df['bb_upper'] = bb.bollinger_hband()
+                df['bb_lower'] = bb.bollinger_lband()
+            
+            logger.info(f"Fetched {len(df)} days of data for {symbol}")
             return df
             
         except Exception as e:
@@ -199,60 +228,76 @@ class LiveTradingBot:
             
             current_price = df['close'].iloc[-1]
             
-            # Determine trade direction
+            # Determine trade direction and enhance confidence
             if prob_3d_up > self.confidence_threshold:
                 direction = 'LONG'
-                confidence = prob_3d_up
-                target_price = current_price * 1.03  # 3% target
-                stop_loss = current_price * 0.98     # 2% stop loss
-                logger.info(f"Strong LONG signal detected for {symbol}:")
-                logger.info(f"  - 3-day Up Probability: {prob_3d_up:.3f}")
-                logger.info(f"  - Sentiment Score: {sentiment_score:.3f}")
-                logger.info(f"  - Combined Confidence: {confidence:.3f}")
+                base_confidence = prob_3d_up
+                # Enhance confidence with advanced indicators
+                enhanced_confidence = self.advanced_indicators.enhance_confidence(
+                    df=df,
+                    base_confidence=base_confidence,
+                    direction=direction,
+                    symbol=symbol  # Pass symbol for insider analysis
+                )
+                
+                if enhanced_confidence > self.confidence_threshold:
+                    target_price = current_price * 1.03  # 3% target
+                    stop_loss = current_price * 0.98     # 2% stop loss
+                    logger.info(f"Strong LONG signal detected for {symbol}:")
+                    logger.info(f"  - 3-day Up Probability: {prob_3d_up:.3f}")
+                    logger.info(f"  - Sentiment Score: {sentiment_score:.3f}")
+                    logger.info(f"  - Enhanced Confidence: {enhanced_confidence:.3f}")
+                    
+                    signal = TradeSignal(
+                        symbol=symbol,
+                        direction=direction,
+                        confidence=enhanced_confidence,
+                        entry_price=current_price,
+                        target_price=target_price,
+                        stop_loss=stop_loss,
+                        sentiment_score=sentiment_score,
+                        ml_probability=prob_3d_up,
+                        timestamp=datetime.now()
+                    )
+                    return signal
                 
             elif prob_3d_down > self.confidence_threshold:
                 direction = 'SHORT'
-                confidence = prob_3d_down
-                target_price = current_price * 0.97  # 3% target (price going down)
-                stop_loss = current_price * 1.02     # 2% stop loss
-                logger.info(f"Strong SHORT signal detected for {symbol}:")
-                logger.info(f"  - 3-day Down Probability: {prob_3d_down:.3f}")
-                logger.info(f"  - Sentiment Score: {sentiment_score:.3f}")
-                logger.info(f"  - Combined Confidence: {confidence:.3f}")
+                base_confidence = prob_3d_down
+                # Enhance confidence with advanced indicators
+                enhanced_confidence = self.advanced_indicators.enhance_confidence(
+                    df=df,
+                    base_confidence=base_confidence,
+                    direction=direction,
+                    symbol=symbol  # Pass symbol for insider analysis
+                )
                 
-            else:
-                logger.info(f"No trade signal for {symbol}:")
-                logger.info(f"  - 3-day Up Probability: {prob_3d_up:.3f}")
-                logger.info(f"  - 3-day Down Probability: {prob_3d_down:.3f}")
-                logger.info(f"  - Required Threshold: {self.confidence_threshold:.3f}")
-                return None  # No strong signal
+                if enhanced_confidence > self.confidence_threshold:
+                    target_price = current_price * 0.97  # 3% target
+                    stop_loss = current_price * 1.02     # 2% stop loss
+                    logger.info(f"Strong SHORT signal detected for {symbol}:")
+                    logger.info(f"  - 3-day Down Probability: {prob_3d_down:.3f}")
+                    logger.info(f"  - Sentiment Score: {sentiment_score:.3f}")
+                    logger.info(f"  - Enhanced Confidence: {enhanced_confidence:.3f}")
+                    
+                    signal = TradeSignal(
+                        symbol=symbol,
+                        direction=direction,
+                        confidence=enhanced_confidence,
+                        entry_price=current_price,
+                        target_price=target_price,
+                        stop_loss=stop_loss,
+                        sentiment_score=sentiment_score,
+                        ml_probability=prob_3d_down,
+                        timestamp=datetime.now()
+                    )
+                    return signal
             
-            # Enhance signal with sentiment
-            sentiment_boost = abs(sentiment_score) * 0.1  # Boost confidence based on sentiment strength
-            if (direction == 'LONG' and sentiment_score > 0) or (direction == 'SHORT' and sentiment_score < 0):
-                confidence += sentiment_boost
-            
-            # Cap confidence at 0.95
-            confidence = min(confidence, 0.95)
-            
-            # Only trade if enhanced confidence is still above threshold
-            if confidence < self.confidence_threshold:
-                return None
-            
-            signal = TradeSignal(
-                symbol=symbol,
-                direction=direction,
-                confidence=confidence,
-                entry_price=current_price,
-                target_price=target_price,
-                stop_loss=stop_loss,
-                sentiment_score=sentiment_score,
-                ml_probability=prob_3d_up if direction == 'LONG' else prob_3d_down,
-                timestamp=datetime.now()
-            )
-            
-            logger.info(f"Generated signal for {symbol}: {direction} @ ${current_price:.2f}, confidence={confidence:.3f}, sentiment={sentiment_score:.3f}")
-            return signal
+            logger.info(f"No trade signal for {symbol}:")
+            logger.info(f"  - 3-day Up Probability: {prob_3d_up:.3f}")
+            logger.info(f"  - 3-day Down Probability: {prob_3d_down:.3f}")
+            logger.info(f"  - Required Threshold: {self.confidence_threshold:.3f}")
+            return None
             
         except Exception as e:
             logger.error(f"Error generating signal for {symbol}: {str(e)}")
@@ -555,7 +600,13 @@ class LiveTradingBot:
             } for symbol, pos in self.positions.items()}
         }
 
-def start_live_trading(symbols: List[str] = None, paper_trading: bool = True):
+def start_live_trading(
+    symbols: List[str] = None,
+    paper_trading: bool = True,
+    max_positions: int = 5,
+    risk_per_trade: float = 0.02,
+    confidence_threshold: float = 0.65
+):
     """Start the live trading bot"""
     if symbols is None:
         symbols = ['AAPL', 'MSFT', 'TSLA', 'NVDA', 'GOOGL']
@@ -563,7 +614,13 @@ def start_live_trading(symbols: List[str] = None, paper_trading: bool = True):
     # Create logs directory
     os.makedirs('logs', exist_ok=True)
     
-    bot = LiveTradingBot(symbols=symbols, paper_trading=paper_trading)
+    bot = LiveTradingBot(
+        symbols=symbols,
+        paper_trading=paper_trading,
+        max_positions=max_positions,
+        risk_per_trade=risk_per_trade,
+        confidence_threshold=confidence_threshold
+    )
     
     # Schedule trading cycles
     schedule.every(5).minutes.do(bot.run_trading_cycle)  # Run every 5 minutes during market hours
