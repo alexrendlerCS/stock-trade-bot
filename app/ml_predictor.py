@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import ta
 import warnings
 from sklearn.exceptions import InconsistentVersionWarning
+import os
 
 # Suppress scikit-learn version mismatch warning
 warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
@@ -18,14 +19,15 @@ load_dotenv()
 class MLPredictor:
     def __init__(self):
         try:
-            # Use new retrained models
-            self.model_3d = joblib.load('rf_model_target_3d_new.pkl')
-            self.model_5d = joblib.load('rf_model_target_5d_new.pkl')
+            # Use new retrained models from data/models directory
+            models_dir = os.path.join('data', 'models')
+            self.model_3d = joblib.load(os.path.join(models_dir, 'rf_model_target_3d_new.pkl'))
+            self.model_5d = joblib.load(os.path.join(models_dir, 'rf_model_target_5d_new.pkl'))
             
             # Load feature list
             self.feature_cols = []
             try:
-                with open('model_features.txt', 'r') as f:
+                with open(os.path.join(models_dir, 'model_features.txt'), 'r') as f:
                     self.feature_cols = [line.strip() for line in f.readlines()]
                 logger.info(f"Loaded {len(self.feature_cols)} features")
             except FileNotFoundError:
@@ -71,32 +73,94 @@ class MLPredictor:
             if self.model_3d is None or self.model_5d is None:
                 logger.error("Models not loaded properly")
                 return None
+            
+            logger.info(f"\nMaking prediction for {symbol if symbol else 'unknown symbol'}:")
+            logger.info(f"Input data shape: {df.shape}")
+            logger.info(f"Date range: {df.index[0]} to {df.index[-1]}")
                 
             # Prepare features similar to training data
+            logger.info("Preparing features...")
             features_df = self._prepare_features(df)
             
             if features_df is None or len(features_df) == 0:
                 logger.error("Could not prepare features")
                 return None
             
+            # Log technical indicators for latest data point
+            latest_data = features_df.iloc[-1]
+            logger.info("\nLatest Technical Indicators:")
+            logger.info(f"RSI: {latest_data.get('rsi', 'N/A'):.2f}")
+            logger.info(f"MACD: {latest_data.get('macd', 'N/A'):.4f}")
+            logger.info(f"MACD Signal: {latest_data.get('macd_signal', 'N/A'):.4f}")
+            logger.info(f"Bollinger Band Width: {latest_data.get('bb_width', 'N/A'):.2f}")
+            logger.info(f"Stochastic K: {latest_data.get('stoch_k', 'N/A'):.2f}")
+            logger.info(f"Stochastic D: {latest_data.get('stoch_d', 'N/A'):.2f}")
+            
+            # Log momentum indicators
+            logger.info("\nMomentum Indicators:")
+            logger.info(f"5-day Momentum: {latest_data.get('momentum_5', 'N/A'):.2%}")
+            logger.info(f"10-day Momentum: {latest_data.get('momentum_10', 'N/A'):.2%}")
+            logger.info(f"20-day Momentum: {latest_data.get('momentum_20', 'N/A'):.2%}")
+            
+            # Log volatility
+            logger.info("\nVolatility Metrics:")
+            logger.info(f"5-day Volatility: {latest_data.get('volatility_5', 'N/A'):.2%}")
+            logger.info(f"10-day Volatility: {latest_data.get('volatility_10', 'N/A'):.2%}")
+            logger.info(f"20-day Volatility: {latest_data.get('volatility_20', 'N/A'):.2%}")
+            
             # Add news sentiment features if available
+            sentiment_score = 0.0
             if symbol and self.news_analyzer:
+                logger.info("\nGetting news sentiment features...")
                 sentiment_features = self._get_sentiment_features(symbol)
                 if sentiment_features:
-                    print(f"Adding news sentiment features for {symbol}")
-                    # Add sentiment features to the latest row
+                    logger.info("News Sentiment Analysis:")
                     for feature_name, feature_value in sentiment_features.items():
                         features_df.loc[features_df.index[-1], feature_name] = feature_value
+                        logger.info(f"  {feature_name}: {feature_value:.3f}")
+                    sentiment_score = sentiment_features.get('news_sentiment_score', 0.0)
             
             # Get the latest feature vector with only the model features
             latest_features = features_df[self.feature_cols].iloc[-1:].fillna(0)
             
-            print(f"Making prediction with features shape: {latest_features.shape}")
-            print(f"Features: {latest_features.columns.tolist()[:10]}...")
-            
             # Make predictions
+            logger.info("\nRunning ML models...")
             pred_3d = self.model_3d.predict_proba(latest_features)[0]
             pred_5d = self.model_5d.predict_proba(latest_features)[0]
+            
+            # Calculate confidence scores
+            up_confidence_3d = pred_3d[1]
+            down_confidence_3d = pred_3d[0]
+            up_confidence_5d = pred_5d[1]
+            down_confidence_5d = pred_5d[0]
+            
+            logger.info("\nConfidence Analysis:")
+            logger.info("3-Day Prediction:")
+            logger.info(f"  Upward Movement Confidence: {up_confidence_3d:.3f}")
+            logger.info(f"  Downward Movement Confidence: {down_confidence_3d:.3f}")
+            logger.info(f"  Sentiment Contribution: {sentiment_score:.3f}")
+            
+            logger.info("\n5-Day Prediction:")
+            logger.info(f"  Upward Movement Confidence: {up_confidence_5d:.3f}")
+            logger.info(f"  Downward Movement Confidence: {down_confidence_5d:.3f}")
+            logger.info(f"  Sentiment Contribution: {sentiment_score:.3f}")
+            
+            # Log decision factors
+            logger.info("\nDecision Factors:")
+            if max(up_confidence_3d, down_confidence_3d) > 0.65:
+                logger.info("✅ 3-day confidence exceeds threshold")
+            else:
+                logger.info(f"❌ 3-day confidence ({max(up_confidence_3d, down_confidence_3d):.3f}) below threshold (0.65)")
+                
+            if abs(sentiment_score) > 0.2:
+                logger.info("✅ Strong sentiment signal detected")
+            else:
+                logger.info(f"❌ Weak sentiment signal ({sentiment_score:.3f})")
+                
+            if latest_data.get('volatility_5', 0) < 0.02:
+                logger.info("✅ Low volatility environment")
+            else:
+                logger.info(f"❌ High volatility ({latest_data.get('volatility_5', 0):.2%})")
             
             # Get sentiment info for the response
             sentiment_info = {}
@@ -125,8 +189,8 @@ class MLPredictor:
         except Exception as e:
             logger.error(f"Error making predictions: {str(e)}")
             import traceback
-            traceback.print_exc()
-            return None 
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
     
     def _get_sentiment_features(self, symbol: str) -> Optional[Dict[str, float]]:
         """Get news sentiment features for a symbol"""
@@ -176,81 +240,87 @@ class MLPredictor:
             # Capitalize column names to match training data
             features_df.columns = [col.capitalize() for col in features_df.columns]
             
-            print(f"Starting feature preparation with {len(features_df)} rows")
+            logger.info(f"Starting feature preparation with {len(features_df)} rows")
             
             # Add Adj Close (same as Close for now)
             features_df['Adj Close'] = features_df['Close']
             
             # Technical indicators
-            print("Adding technical indicators...")
+            logger.info("Adding technical indicators...")
             
             # RSI
+            logger.info("  Calculating RSI...")
             features_df['rsi'] = ta.momentum.RSIIndicator(features_df['Close']).rsi()
             
             # MACD
+            logger.info("  Calculating MACD...")
             macd = ta.trend.MACD(features_df['Close'])
             features_df['macd'] = macd.macd()
             features_df['macd_signal'] = macd.macd_signal()
             features_df['macd_diff'] = macd.macd_diff()
             
             # Bollinger Bands
+            logger.info("  Calculating Bollinger Bands...")
             bb = ta.volatility.BollingerBands(features_df['Close'])
             features_df['bb_high'] = bb.bollinger_hband()
             features_df['bb_low'] = bb.bollinger_lband()
             features_df['bb_width'] = features_df['bb_high'] - features_df['bb_low']
             
             # Stochastic Oscillator
+            logger.info("  Calculating Stochastic Oscillator...")
             stoch = ta.momentum.StochasticOscillator(features_df['High'], features_df['Low'], features_df['Close'])
             features_df['stoch_k'] = stoch.stoch()
             features_df['stoch_d'] = stoch.stoch_signal()
             
             # Moving Averages
+            logger.info("  Calculating Moving Averages...")
             for window in [10, 20, 50, 200]:
                 features_df[f'sma_{window}'] = ta.trend.SMAIndicator(features_df['Close'], window=window).sma_indicator()
                 features_df[f'ema_{window}'] = ta.trend.EMAIndicator(features_df['Close'], window=window).ema_indicator()
             
             # Lagged returns
-            print("Adding lagged returns...")
+            logger.info("Adding lagged returns...")
             returns = features_df['Close'].pct_change()
             for lag in [1, 2, 3, 5, 10]:
                 features_df[f'return_lag_{lag}'] = returns.shift(lag)
             
-            # Volatility (rolling standard deviation of returns)
-            print("Adding volatility features...")
+            # Volatility
+            logger.info("Adding volatility features...")
             for window in [5, 10, 20]:
                 features_df[f'volatility_{window}'] = returns.rolling(window=window).std()
             
-            # Momentum (price change over different periods)
-            print("Adding momentum features...")
+            # Momentum
+            logger.info("Adding momentum features...")
             for window in [5, 10, 20]:
                 features_df[f'momentum_{window}'] = features_df['Close'].pct_change(periods=window)
             
             # Price ratios
-            print("Adding price ratios...")
+            logger.info("Adding price ratios...")
             features_df['close_open_ratio'] = features_df['Close'] / features_df['Open']
             features_df['close_high_ratio'] = features_df['Close'] / features_df['High']
             features_df['close_low_ratio'] = features_df['Close'] / features_df['Low']
             features_df['high_low_ratio'] = features_df['High'] / features_df['Low']
             
             # Time features
-            print("Adding time features...")
+            logger.info("Adding time features...")
             features_df['day_of_week'] = pd.to_datetime(features_df.index).dayofweek
             features_df['month'] = pd.to_datetime(features_df.index).month
             
-            print("Handling NaN values...")
+            logger.info("Handling NaN values...")
             # Forward fill then backward fill to handle NaN values
             features_df = features_df.ffill().bfill()
             
             # Ensure we have all required features
             missing_features = [f for f in self.feature_cols if f not in features_df.columns]
             if missing_features:
-                print(f"Warning: Missing features: {missing_features}")
+                logger.warning(f"Missing features: {missing_features}")
                 # Add missing features with default values
                 for feature in missing_features:
                     features_df[feature] = 0
+                    logger.info(f"Added missing feature {feature} with default value 0")
             
-            print(f"Feature preparation completed. Final shape: {features_df.shape}")
-            print(f"Available features: {len([f for f in self.feature_cols if f in features_df.columns])}/{len(self.feature_cols)}")
+            logger.info(f"Feature preparation completed. Final shape: {features_df.shape}")
+            logger.info(f"Available features: {len([f for f in self.feature_cols if f in features_df.columns])}/{len(self.feature_cols)}")
             
             if len(features_df) == 0:
                 logger.error("No data remaining after feature preparation")
@@ -261,5 +331,5 @@ class MLPredictor:
         except Exception as e:
             logger.error(f"Error preparing features: {str(e)}")
             import traceback
-            traceback.print_exc()
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None 

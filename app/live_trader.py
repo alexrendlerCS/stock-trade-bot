@@ -161,32 +161,76 @@ class LiveTradingBot:
     def get_live_data(self, symbol: str, period: str = '5d') -> Optional[pd.DataFrame]:
         """Get live market data for a symbol"""
         try:
+            logger.info(f"Fetching data for {symbol}...")
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval='1d')
+            
+            # Try to get more frequent data for a shorter period
+            logger.info(f"Attempting to fetch 15-minute data for {symbol}")
+            df = ticker.history(period='10d', interval='15m')
             
             if df.empty:
-                logger.warning(f"No data available for {symbol}")
-                return None
+                logger.info(f"No intraday data available for {symbol}, falling back to daily data")
+                df = ticker.history(period='10d', interval='1d')
+                if df.empty:
+                    logger.warning(f"No data available for {symbol}")
+                    return None
+            
+            logger.info(f"Retrieved {len(df)} raw data points for {symbol}")
+            
+            # Resample to daily data if we got intraday
+            if len(df) > 10:  # If we got intraday data
+                logger.info(f"Resampling intraday data to daily for {symbol}")
+                df = df.resample('D').agg({
+                    'Open': 'first',
+                    'High': 'max',
+                    'Low': 'min',
+                    'Close': 'last',
+                    'Volume': 'sum'
+                }).dropna()
+                logger.info(f"Resampled to {len(df)} daily points for {symbol}")
             
             # Clean column names
             df.columns = [col.lower() for col in df.columns]
+            
+            # Ensure we have enough data
+            if len(df) < 5:
+                logger.warning(f"Insufficient data points for {symbol}: only {len(df)} days available")
+                return None
+            
+            logger.info(f"Final dataset for {symbol}: {len(df)} days from {df.index[0]} to {df.index[-1]}")
+            logger.info(f"Latest price for {symbol}: ${df['close'].iloc[-1]:.2f}")
             return df
             
         except Exception as e:
             logger.error(f"Error fetching data for {symbol}: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
     
     def generate_trade_signal(self, symbol: str) -> Optional[TradeSignal]:
         """Generate a trade signal using ML and sentiment analysis"""
         try:
+            logger.info(f"\n{'='*20} Analyzing {symbol} {'='*20}")
+            
             # Get market data
             df = self.get_live_data(symbol, period='60d')  # Need more data for technical indicators
             if df is None or len(df) < 30:
+                logger.warning(f"Insufficient data for {symbol}")
                 return None
+            
+            # Calculate price changes
+            price_change_1d = (df['close'].iloc[-1] / df['close'].iloc[-2] - 1) * 100
+            price_change_5d = (df['close'].iloc[-1] / df['close'].iloc[-6] - 1) * 100
+            
+            logger.info("\nPrice Analysis:")
+            logger.info(f"Current Price: ${df['close'].iloc[-1]:.2f}")
+            logger.info(f"1-day Change: {price_change_1d:+.2f}%")
+            logger.info(f"5-day Change: {price_change_5d:+.2f}%")
             
             # Get ML prediction with sentiment
             prediction = self.ml_predictor.predict(df, symbol=symbol)
             if prediction is None:
+                logger.warning("No prediction available")
                 return None
             
             # Extract probabilities
@@ -199,44 +243,60 @@ class LiveTradingBot:
             
             current_price = df['close'].iloc[-1]
             
+            logger.info("\nSignal Analysis:")
+            logger.info(f"3-day Up Probability: {prob_3d_up:.3f}")
+            logger.info(f"3-day Down Probability: {prob_3d_down:.3f}")
+            logger.info(f"Sentiment Score: {sentiment_score:.3f}")
+            logger.info(f"Required Confidence: {self.confidence_threshold:.3f}")
+            
             # Determine trade direction
             if prob_3d_up > self.confidence_threshold:
                 direction = 'LONG'
                 confidence = prob_3d_up
                 target_price = current_price * 1.03  # 3% target
                 stop_loss = current_price * 0.98     # 2% stop loss
-                logger.info(f"Strong LONG signal detected for {symbol}:")
-                logger.info(f"  - 3-day Up Probability: {prob_3d_up:.3f}")
-                logger.info(f"  - Sentiment Score: {sentiment_score:.3f}")
-                logger.info(f"  - Combined Confidence: {confidence:.3f}")
+                logger.info(f"\n✅ Strong LONG signal detected:")
+                logger.info(f"  Base Confidence: {prob_3d_up:.3f}")
+                logger.info(f"  Sentiment Boost: {max(0, sentiment_score * 0.1):.3f}")
+                logger.info(f"  Target Price: ${target_price:.2f} (+3%)")
+                logger.info(f"  Stop Loss: ${stop_loss:.2f} (-2%)")
                 
             elif prob_3d_down > self.confidence_threshold:
                 direction = 'SHORT'
                 confidence = prob_3d_down
                 target_price = current_price * 0.97  # 3% target (price going down)
                 stop_loss = current_price * 1.02     # 2% stop loss
-                logger.info(f"Strong SHORT signal detected for {symbol}:")
-                logger.info(f"  - 3-day Down Probability: {prob_3d_down:.3f}")
-                logger.info(f"  - Sentiment Score: {sentiment_score:.3f}")
-                logger.info(f"  - Combined Confidence: {confidence:.3f}")
+                logger.info(f"\n✅ Strong SHORT signal detected:")
+                logger.info(f"  Base Confidence: {prob_3d_down:.3f}")
+                logger.info(f"  Sentiment Boost: {max(0, -sentiment_score * 0.1):.3f}")
+                logger.info(f"  Target Price: ${target_price:.2f} (-3%)")
+                logger.info(f"  Stop Loss: ${stop_loss:.2f} (+2%)")
                 
             else:
-                logger.info(f"No trade signal for {symbol}:")
-                logger.info(f"  - 3-day Up Probability: {prob_3d_up:.3f}")
-                logger.info(f"  - 3-day Down Probability: {prob_3d_down:.3f}")
-                logger.info(f"  - Required Threshold: {self.confidence_threshold:.3f}")
-                return None  # No strong signal
+                logger.info("\n❌ No actionable signal:")
+                logger.info(f"  Highest Confidence: {max(prob_3d_up, prob_3d_down):.3f}")
+                logger.info(f"  Required Threshold: {self.confidence_threshold:.3f}")
+                logger.info(f"  Gap to Threshold: {(self.confidence_threshold - max(prob_3d_up, prob_3d_down)):.3f}")
+                return None
             
             # Enhance signal with sentiment
-            sentiment_boost = abs(sentiment_score) * 0.1  # Boost confidence based on sentiment strength
+            sentiment_boost = abs(sentiment_score) * 0.1
             if (direction == 'LONG' and sentiment_score > 0) or (direction == 'SHORT' and sentiment_score < 0):
                 confidence += sentiment_boost
+                logger.info(f"\nSentiment Alignment:")
+                logger.info(f"  Direction matches sentiment")
+                logger.info(f"  Confidence boosted by: +{sentiment_boost:.3f}")
+            else:
+                logger.info(f"\nSentiment Misalignment:")
+                logger.info(f"  Sentiment contradicts direction")
+                logger.info(f"  No confidence boost applied")
             
             # Cap confidence at 0.95
             confidence = min(confidence, 0.95)
             
-            # Only trade if enhanced confidence is still above threshold
+            # Final confidence check
             if confidence < self.confidence_threshold:
+                logger.info(f"\n❌ Final confidence ({confidence:.3f}) below threshold ({self.confidence_threshold:.3f})")
                 return None
             
             signal = TradeSignal(
@@ -251,7 +311,15 @@ class LiveTradingBot:
                 timestamp=datetime.now()
             )
             
-            logger.info(f"Generated signal for {symbol}: {direction} @ ${current_price:.2f}, confidence={confidence:.3f}, sentiment={sentiment_score:.3f}")
+            logger.info(f"\n✅ Final Signal Generated:")
+            logger.info(f"  Direction: {direction}")
+            logger.info(f"  Entry Price: ${current_price:.2f}")
+            logger.info(f"  Target Price: ${target_price:.2f}")
+            logger.info(f"  Stop Loss: ${stop_loss:.2f}")
+            logger.info(f"  Final Confidence: {confidence:.3f}")
+            logger.info(f"  Risk/Reward Ratio: {abs(target_price - current_price) / abs(stop_loss - current_price):.2f}")
+            logger.info("="*50 + "\n")
+            
             return signal
             
         except Exception as e:
@@ -506,35 +574,63 @@ class LiveTradingBot:
         """Run one complete trading cycle"""
         try:
             if not self.is_market_open():
-                logger.info("Market is closed")
                 return
             
-            logger.info("Starting trading cycle...")
+            logger.info("\n" + "="*50)
+            logger.info("Starting new trading cycle...")
+            logger.info("="*50)
             
             # Check existing positions first
+            if self.positions:
+                logger.info("\nChecking existing positions:")
+                for symbol, pos in self.positions.items():
+                    logger.info(f"  {symbol}: {pos.direction} | Entry: ${pos.entry_price:.2f} | Current: ${pos.current_price:.2f} | P&L: ${pos.unrealized_pnl:.2f}")
+            else:
+                logger.info("\nNo open positions")
+            
             self.check_positions()
             
             # Look for new opportunities
+            logger.info("\nAnalyzing symbols for new opportunities:")
             for symbol in self.symbols:
                 try:
                     if symbol in self.positions:
-                        continue  # Skip if we already have a position
+                        logger.info(f"  {symbol}: Skipping - Already have position")
+                        continue
                     
+                    logger.info(f"\nAnalyzing {symbol}:")
                     signal = self.generate_trade_signal(symbol)
+                    
                     if signal:
+                        logger.info(f"  Trade signal generated for {symbol}:")
+                        logger.info(f"    Direction: {signal.direction}")
+                        logger.info(f"    Confidence: {signal.confidence:.3f}")
+                        logger.info(f"    Entry Price: ${signal.entry_price:.2f}")
+                        logger.info(f"    Target: ${signal.target_price:.2f}")
+                        logger.info(f"    Stop Loss: ${signal.stop_loss:.2f}")
+                        logger.info(f"    Sentiment Score: {signal.sentiment_score:.3f}")
+                        
                         self.execute_trade(signal)
                         time.sleep(1)  # Small delay between trades
+                    else:
+                        logger.info(f"  No actionable signal for {symbol}")
                     
                 except Exception as e:
                     logger.error(f"Error processing {symbol}: {str(e)}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     continue
             
             # Log portfolio status
             total_pnl = sum(pos.unrealized_pnl for pos in self.positions.values())
-            logger.info(f"Portfolio: ${self.portfolio_value:.2f} | Open Positions: {len(self.positions)} | Unrealized P&L: ${total_pnl:.2f}")
+            logger.info("\nEnd of trading cycle summary:")
+            logger.info(f"  Portfolio Value: ${self.portfolio_value:,.2f}")
+            logger.info(f"  Open Positions: {len(self.positions)}")
+            logger.info(f"  Unrealized P&L: ${total_pnl:,.2f}")
+            logger.info("="*50 + "\n")
             
         except Exception as e:
             logger.error(f"Error in trading cycle: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
     
     def get_portfolio_summary(self) -> Dict:
         """Get current portfolio summary"""
