@@ -3,6 +3,7 @@ import yfinance as yf
 import time
 import logging
 from datetime import datetime, timedelta
+from datetime import time as datetime_time
 from typing import Dict, List, Optional
 import schedule
 import json
@@ -61,13 +62,15 @@ class LiveTradingBot:
                  paper_trading: bool = True,
                  max_positions: int = 5,
                  risk_per_trade: float = 0.02,  # 2% risk per trade
-                 confidence_threshold: float = 0.65):
+                 confidence_threshold: float = 0.65,
+                 testing_mode: bool = False):  # Added testing mode parameter
         
         self.symbols = symbols
         self.paper_trading = paper_trading
         self.max_positions = max_positions
         self.risk_per_trade = risk_per_trade
         self.confidence_threshold = confidence_threshold
+        self.testing_mode = testing_mode
         
         # Initialize Alpaca API
         self.api = REST(
@@ -84,11 +87,14 @@ class LiveTradingBot:
         self.ml_predictor = MLPredictor()
         self.positions = {}
         
+        # For testing mode
+        self.current_test_time = datetime.now() if not testing_mode else datetime(2024, 1, 1, 10, 0)
+        
         # Database for trade history
         self._init_database()
         
         logger.info(f"LiveTradingBot initialized")
-        logger.info(f"Paper Trading: {paper_trading}")
+        logger.info(f"Mode: {'Testing' if testing_mode else 'Paper Trading' if paper_trading else 'Live Trading'}")
         logger.info(f"Portfolio Value: ${self.portfolio_value:,.2f}")
         logger.info(f"Symbols: {symbols}")
     
@@ -135,7 +141,34 @@ class LiveTradingBot:
     
     def is_market_open(self) -> bool:
         """Check if US stock market is currently open"""
-        # Get current time in Eastern Time
+        if self.testing_mode:
+            # In testing mode, we'll simulate market hours
+            test_time = self.current_test_time.time()
+            test_day = self.current_test_time.weekday()
+            
+            # Update test time (simulate time passing)
+            self.current_test_time += timedelta(minutes=5)
+            
+            # Check if it's a weekday (Monday = 0, Sunday = 6)
+            if test_day >= 5:  # Saturday or Sunday
+                logger.info("Market is closed (Weekend)")
+                return False
+            
+            # Market hours: 9:30 AM - 4:00 PM ET
+            market_open = datetime_time(9, 30)
+            market_close = datetime_time(16, 0)
+            
+            if test_time < market_open:
+                logger.info("Market is not open yet")
+                return False
+            elif test_time > market_close:
+                logger.info("Market is closed for the day")
+                return False
+            
+            logger.info(f"Market is open (Test Time: {self.current_test_time.strftime('%Y-%m-%d %H:%M:%S')})")
+            return True
+        
+        # Real market hours check
         et_tz = pytz.timezone(settings.TIMEZONE)
         now = datetime.now(et_tz)
         
@@ -164,38 +197,60 @@ class LiveTradingBot:
             logger.info(f"Fetching data for {symbol}...")
             ticker = yf.Ticker(symbol)
             
-            # Try to get more frequent data for a shorter period
-            logger.info(f"Attempting to fetch 15-minute data for {symbol}")
-            df = ticker.history(period='10d', interval='15m')
-            
-            if df.empty:
-                logger.info(f"No intraday data available for {symbol}, falling back to daily data")
-                df = ticker.history(period='10d', interval='1d')
+            if self.testing_mode:
+                # In testing mode, fetch historical data up to current_test_time
+                end_date = self.current_test_time
+                start_date = end_date - timedelta(days=60)  # Get 60 days of data
+                
+                logger.info(f"Testing Mode: Fetching historical data from {start_date.date()} to {end_date.date()}")
+                df = ticker.history(start=start_date, end=end_date, interval='1d')
+                
                 if df.empty:
-                    logger.warning(f"No data available for {symbol}")
+                    logger.warning(f"No historical data available for {symbol}")
                     return None
-            
-            logger.info(f"Retrieved {len(df)} raw data points for {symbol}")
-            
-            # Resample to daily data if we got intraday
-            if len(df) > 10:  # If we got intraday data
-                logger.info(f"Resampling intraday data to daily for {symbol}")
-                df = df.resample('D').agg({
-                    'Open': 'first',
-                    'High': 'max',
-                    'Low': 'min',
-                    'Close': 'last',
-                    'Volume': 'sum'
-                }).dropna()
-                logger.info(f"Resampled to {len(df)} daily points for {symbol}")
+                
+                logger.info(f"Retrieved {len(df)} historical daily points for {symbol}")
+            else:
+                # Normal live trading mode
+                logger.info(f"Attempting to fetch 15-minute data for {symbol}")
+                df = ticker.history(period='30d', interval='15m')
+                
+                if df.empty:
+                    logger.info(f"No intraday data available for {symbol}, falling back to daily data")
+                    df = ticker.history(period='30d', interval='1d')
+                    if df.empty:
+                        logger.warning(f"No data available for {symbol}")
+                        return None
+                
+                logger.info(f"Retrieved {len(df)} raw data points for {symbol}")
+                
+                # Resample to daily data if we got intraday
+                if len(df) > 10:  # If we got intraday data
+                    logger.info(f"Resampling intraday data to daily for {symbol}")
+                    df = df.resample('D').agg({
+                        'Open': 'first',
+                        'High': 'max',
+                        'Low': 'min',
+                        'Close': 'last',
+                        'Volume': 'sum'
+                    }).dropna()
+                    logger.info(f"Resampled to {len(df)} daily points for {symbol}")
             
             # Clean column names
             df.columns = [col.lower() for col in df.columns]
             
             # Ensure we have enough data
-            if len(df) < 5:
+            if len(df) < 10:
                 logger.warning(f"Insufficient data points for {symbol}: only {len(df)} days available")
                 return None
+            
+            # Fix for stock splits and adjustments
+            if symbol == 'NVDA' and df['close'].mean() < 100:
+                logger.info(f"Adjusting NVDA price data for split")
+                df['open'] *= 10
+                df['high'] *= 10
+                df['low'] *= 10
+                df['close'] *= 10
             
             logger.info(f"Final dataset for {symbol}: {len(df)} days from {df.index[0]} to {df.index[-1]}")
             logger.info(f"Latest price for {symbol}: ${df['close'].iloc[-1]:.2f}")
@@ -214,8 +269,8 @@ class LiveTradingBot:
             
             # Get market data
             df = self.get_live_data(symbol, period='60d')  # Need more data for technical indicators
-            if df is None or len(df) < 30:
-                logger.warning(f"Insufficient data for {symbol}")
+            if df is None or len(df) < 10:  # Changed from 30 to 10 to match our resampled data
+                logger.warning(f"Insufficient data for {symbol} (minimum 10 days required)")
                 return None
             
             # Calculate price changes
@@ -233,11 +288,9 @@ class LiveTradingBot:
                 logger.warning("No prediction available")
                 return None
             
-            # Extract probabilities
+            # Extract probabilities and sentiment (single API call)
             prob_3d_up = prediction['3d'][0]
             prob_3d_down = prediction['3d'][1]
-            
-            # Get sentiment info
             sentiment_info = prediction.get('sentiment', {})
             sentiment_score = sentiment_info.get('sentiment_score', 0.0)
             
@@ -249,78 +302,51 @@ class LiveTradingBot:
             logger.info(f"Sentiment Score: {sentiment_score:.3f}")
             logger.info(f"Required Confidence: {self.confidence_threshold:.3f}")
             
-            # Determine trade direction
-            if prob_3d_up > self.confidence_threshold:
-                direction = 'LONG'
-                confidence = prob_3d_up
-                target_price = current_price * 1.03  # 3% target
-                stop_loss = current_price * 0.98     # 2% stop loss
-                logger.info(f"\n✅ Strong LONG signal detected:")
-                logger.info(f"  Base Confidence: {prob_3d_up:.3f}")
-                logger.info(f"  Sentiment Boost: {max(0, sentiment_score * 0.1):.3f}")
-                logger.info(f"  Target Price: ${target_price:.2f} (+3%)")
-                logger.info(f"  Stop Loss: ${stop_loss:.2f} (-2%)")
+            # Determine trade direction with adjusted confidence threshold
+            base_confidence = max(prob_3d_up, prob_3d_down)
+            sentiment_boost = abs(sentiment_score) * 0.1
+            
+            # Align sentiment with prediction
+            if (prob_3d_up > prob_3d_down and sentiment_score > 0) or \
+               (prob_3d_down > prob_3d_up and sentiment_score < 0):
+                final_confidence = base_confidence + sentiment_boost
+            else:
+                final_confidence = base_confidence
+            
+            # Lower confidence threshold slightly for strong technical signals
+            adjusted_threshold = self.confidence_threshold
+            if base_confidence > 0.60:  # Strong technical signal
+                adjusted_threshold = self.confidence_threshold * 0.95  # 5% lower threshold
+            
+            if final_confidence > adjusted_threshold:
+                direction = 'LONG' if prob_3d_up > prob_3d_down else 'SHORT'
+                target_price = current_price * 1.03 if direction == 'LONG' else current_price * 0.97
+                stop_loss = current_price * 0.98 if direction == 'LONG' else current_price * 1.02
                 
-            elif prob_3d_down > self.confidence_threshold:
-                direction = 'SHORT'
-                confidence = prob_3d_down
-                target_price = current_price * 0.97  # 3% target (price going down)
-                stop_loss = current_price * 1.02     # 2% stop loss
-                logger.info(f"\n✅ Strong SHORT signal detected:")
-                logger.info(f"  Base Confidence: {prob_3d_down:.3f}")
-                logger.info(f"  Sentiment Boost: {max(0, -sentiment_score * 0.1):.3f}")
-                logger.info(f"  Target Price: ${target_price:.2f} (-3%)")
-                logger.info(f"  Stop Loss: ${stop_loss:.2f} (+2%)")
+                logger.info(f"\n✅ Strong {direction} signal detected:")
+                logger.info(f"  Base Confidence: {base_confidence:.3f}")
+                logger.info(f"  Sentiment Boost: {sentiment_boost:.3f}")
+                logger.info(f"  Final Confidence: {final_confidence:.3f}")
+                logger.info(f"  Target Price: ${target_price:.2f}")
+                logger.info(f"  Stop Loss: ${stop_loss:.2f}")
                 
+                return TradeSignal(
+                    symbol=symbol,
+                    direction=direction,
+                    confidence=final_confidence,
+                    entry_price=current_price,
+                    target_price=target_price,
+                    stop_loss=stop_loss,
+                    sentiment_score=sentiment_score,
+                    ml_probability=prob_3d_up if direction == 'LONG' else prob_3d_down,
+                    timestamp=datetime.now()
+                )
             else:
                 logger.info("\n❌ No actionable signal:")
-                logger.info(f"  Highest Confidence: {max(prob_3d_up, prob_3d_down):.3f}")
-                logger.info(f"  Required Threshold: {self.confidence_threshold:.3f}")
-                logger.info(f"  Gap to Threshold: {(self.confidence_threshold - max(prob_3d_up, prob_3d_down)):.3f}")
+                logger.info(f"  Final Confidence: {final_confidence:.3f}")
+                logger.info(f"  Required Threshold: {adjusted_threshold:.3f}")
+                logger.info(f"  Gap to Threshold: {(adjusted_threshold - final_confidence):.3f}")
                 return None
-            
-            # Enhance signal with sentiment
-            sentiment_boost = abs(sentiment_score) * 0.1
-            if (direction == 'LONG' and sentiment_score > 0) or (direction == 'SHORT' and sentiment_score < 0):
-                confidence += sentiment_boost
-                logger.info(f"\nSentiment Alignment:")
-                logger.info(f"  Direction matches sentiment")
-                logger.info(f"  Confidence boosted by: +{sentiment_boost:.3f}")
-            else:
-                logger.info(f"\nSentiment Misalignment:")
-                logger.info(f"  Sentiment contradicts direction")
-                logger.info(f"  No confidence boost applied")
-            
-            # Cap confidence at 0.95
-            confidence = min(confidence, 0.95)
-            
-            # Final confidence check
-            if confidence < self.confidence_threshold:
-                logger.info(f"\n❌ Final confidence ({confidence:.3f}) below threshold ({self.confidence_threshold:.3f})")
-                return None
-            
-            signal = TradeSignal(
-                symbol=symbol,
-                direction=direction,
-                confidence=confidence,
-                entry_price=current_price,
-                target_price=target_price,
-                stop_loss=stop_loss,
-                sentiment_score=sentiment_score,
-                ml_probability=prob_3d_up if direction == 'LONG' else prob_3d_down,
-                timestamp=datetime.now()
-            )
-            
-            logger.info(f"\n✅ Final Signal Generated:")
-            logger.info(f"  Direction: {direction}")
-            logger.info(f"  Entry Price: ${current_price:.2f}")
-            logger.info(f"  Target Price: ${target_price:.2f}")
-            logger.info(f"  Stop Loss: ${stop_loss:.2f}")
-            logger.info(f"  Final Confidence: {confidence:.3f}")
-            logger.info(f"  Risk/Reward Ratio: {abs(target_price - current_price) / abs(stop_loss - current_price):.2f}")
-            logger.info("="*50 + "\n")
-            
-            return signal
             
         except Exception as e:
             logger.error(f"Error generating signal for {symbol}: {str(e)}")
@@ -651,15 +677,25 @@ class LiveTradingBot:
             } for symbol, pos in self.positions.items()}
         }
 
-def start_live_trading(symbols: List[str] = None, paper_trading: bool = True):
-    """Start the live trading bot"""
+def start_live_trading(symbols: List[str] = None, paper_trading: bool = True, testing_mode: bool = False):
+    """Start the live trading bot
+    
+    Args:
+        symbols: List of stock symbols to trade. Defaults to ['AAPL', 'MSFT', 'TSLA', 'NVDA', 'GOOGL']
+        paper_trading: Whether to run in paper trading mode. Defaults to True
+        testing_mode: Whether to run in testing mode with historical data. Defaults to False
+    """
     if symbols is None:
         symbols = ['AAPL', 'MSFT', 'TSLA', 'NVDA', 'GOOGL']
     
     # Create logs directory
     os.makedirs('logs', exist_ok=True)
     
-    bot = LiveTradingBot(symbols=symbols, paper_trading=paper_trading)
+    bot = LiveTradingBot(
+        symbols=symbols, 
+        paper_trading=paper_trading,
+        testing_mode=testing_mode
+    )
     
     # Schedule trading cycles
     schedule.every(5).minutes.do(bot.run_trading_cycle)  # Run every 5 minutes during market hours
