@@ -148,19 +148,19 @@ class MLPredictor:
             # Log decision factors
             logger.info("\nDecision Factors:")
             if max(up_confidence_3d, down_confidence_3d) > 0.65:
-                logger.info("✅ 3-day confidence exceeds threshold")
+                logger.info("[PASS] 3-day confidence exceeds threshold")
             else:
-                logger.info(f"❌ 3-day confidence ({max(up_confidence_3d, down_confidence_3d):.3f}) below threshold (0.65)")
+                logger.info(f"[FAIL] 3-day confidence ({max(up_confidence_3d, down_confidence_3d):.3f}) below threshold (0.65)")
                 
             if abs(sentiment_score) > 0.2:
-                logger.info("✅ Strong sentiment signal detected")
+                logger.info("[PASS] Strong sentiment signal detected")
             else:
-                logger.info(f"❌ Weak sentiment signal ({sentiment_score:.3f})")
+                logger.info(f"[FAIL] Weak sentiment signal ({sentiment_score:.3f})")
                 
             if latest_data.get('volatility_5', 0) < 0.02:
-                logger.info("✅ Low volatility environment")
+                logger.info("[PASS] Low volatility environment")
             else:
-                logger.info(f"❌ High volatility ({latest_data.get('volatility_5', 0):.2%})")
+                logger.info(f"[FAIL] High volatility ({latest_data.get('volatility_5', 0):.2%})")
             
             # Get sentiment info for the response
             sentiment_info = {}
