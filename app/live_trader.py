@@ -609,35 +609,44 @@ class LiveTradingBot:
             market_open_time = current_time.replace(hour=9, minute=30, second=0, microsecond=0)
             market_close_time = current_time.replace(hour=16, minute=0, second=0, microsecond=0)
             
-            # Print market status
+            # Print market status header with current time
             print("\n=== Market Status ===")
+            print(f"Current Time (ET): {current_time.strftime('%I:%M:%S %p')}")
+            print(f"Trading Hours: 9:30 AM - 4:00 PM ET (Mon-Fri)")
+            
             if is_market_open:
-                print("🟢 Market is OPEN")
+                print("\n🟢 Market is OPEN")
                 time_to_close = market_close_time - current_time
                 hours, remainder = divmod(time_to_close.seconds, 3600)
                 minutes = remainder // 60
-                print(f"Time until market close: {hours}h {minutes}m")
+                print(f"Time until market close: {hours}h {minutes:02d}m")
             else:
-                print("🔴 Market is CLOSED")
+                print("\n🔴 Market is CLOSED")
+                
                 if current_time.weekday() >= 5:  # Weekend
-                    print("Market is closed for the weekend")
-                    next_open = current_time + timedelta(days=(7 - current_time.weekday()))
+                    days_to_monday = (7 - current_time.weekday())
+                    next_open = current_time + timedelta(days=days_to_monday)
                     next_open = next_open.replace(hour=9, minute=30, second=0, microsecond=0)
-                elif current_time < market_open_time:  # Before market opens
-                    print("Market opens at 9:30 AM ET")
+                    print(f"Reason: Weekend ({current_time.strftime('%A')})")
+                elif current_time < market_open_time:  # Pre-market
                     next_open = market_open_time
-                else:  # After market closes
-                    print("Market closed at 4:00 PM ET")
+                    print("Reason: Pre-market hours")
+                else:  # After-hours
                     next_open = (current_time + timedelta(days=1)).replace(hour=9, minute=30, second=0, microsecond=0)
                     while next_open.weekday() >= 5:  # Skip weekends
                         next_open += timedelta(days=1)
+                    print("Reason: After-hours")
+                
+                # Calculate time until next market open
                 time_to_open = next_open - current_time
-                hours, remainder = divmod(time_to_open.seconds, 3600)
-                minutes = remainder // 60
-                print(f"Next market open: {next_open.strftime('%A, %B %d at 9:30 AM ET')}")
-                print(f"Time until market open: {hours}h {minutes}m")
-            print(f"Current time: {current_time.strftime('%I:%M:%S %p ET')}")
-            print("Market hours: 9:30 AM - 4:00 PM ET (Mon-Fri)")
+                total_hours = time_to_open.days * 24 + time_to_open.seconds // 3600
+                minutes = (time_to_open.seconds % 3600) // 60
+                
+                # Format next market open date
+                next_open_str = next_open.strftime("%A, %B %-d")  # This will show e.g., "Friday, February 9"
+                
+                print(f"Next market open: {next_open_str} at 9:30 AM ET")
+                print(f"Time until market open: {total_hours}h {minutes:02d}m")
             
             if not is_market_open:
                 print("\nSkipping trading cycle - market is closed")
