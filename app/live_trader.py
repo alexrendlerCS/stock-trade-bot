@@ -21,8 +21,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/trading_bot.log'),
-        logging.StreamHandler()
+        logging.FileHandler('logs/trading_bot.log')  # Only log to file
     ]
 )
 logger = logging.getLogger(__name__)
@@ -296,6 +295,11 @@ class LiveTradingBot:
             
             current_price = df['close'].iloc[-1]
             
+            # Print confidence levels for all symbols
+            direction = 'UP' if prob_3d_up > prob_3d_down else 'DOWN'
+            confidence = max(prob_3d_up, prob_3d_down)
+            print(f"{symbol} Confidence: {confidence:.3f} ({direction})")
+            
             logger.info("\nSignal Analysis:")
             logger.info(f"3-day Up Probability: {prob_3d_up:.3f}")
             logger.info(f"3-day Down Probability: {prob_3d_down:.3f}")
@@ -339,7 +343,7 @@ class LiveTradingBot:
                     stop_loss=stop_loss,
                     sentiment_score=sentiment_score,
                     ml_probability=prob_3d_up if direction == 'LONG' else prob_3d_down,
-                    timestamp=datetime.now()
+                    timestamp=self.current_test_time if self.testing_mode else datetime.now()
                 )
             else:
                 logger.info("\n❌ No actionable signal:")
@@ -599,68 +603,148 @@ class LiveTradingBot:
     def run_trading_cycle(self):
         """Run one complete trading cycle"""
         try:
-            if not self.is_market_open():
+            # Check market status
+            is_market_open = self.is_market_open()
+            current_time = datetime.now(pytz.timezone('America/New_York'))
+            market_open_time = current_time.replace(hour=9, minute=30, second=0, microsecond=0)
+            market_close_time = current_time.replace(hour=16, minute=0, second=0, microsecond=0)
+            
+            # Print market status
+            print("\n=== Market Status ===")
+            if is_market_open:
+                print("🟢 Market is OPEN")
+                time_to_close = market_close_time - current_time
+                hours, remainder = divmod(time_to_close.seconds, 3600)
+                minutes = remainder // 60
+                print(f"Time until market close: {hours}h {minutes}m")
+            else:
+                print("🔴 Market is CLOSED")
+                if current_time.weekday() >= 5:  # Weekend
+                    print("Market is closed for the weekend")
+                    next_open = current_time + timedelta(days=(7 - current_time.weekday()))
+                    next_open = next_open.replace(hour=9, minute=30, second=0, microsecond=0)
+                elif current_time < market_open_time:  # Before market opens
+                    print("Market opens at 9:30 AM ET")
+                    next_open = market_open_time
+                else:  # After market closes
+                    print("Market closed at 4:00 PM ET")
+                    next_open = (current_time + timedelta(days=1)).replace(hour=9, minute=30, second=0, microsecond=0)
+                    while next_open.weekday() >= 5:  # Skip weekends
+                        next_open += timedelta(days=1)
+                time_to_open = next_open - current_time
+                hours, remainder = divmod(time_to_open.seconds, 3600)
+                minutes = remainder // 60
+                print(f"Next market open: {next_open.strftime('%A, %B %d at 9:30 AM ET')}")
+                print(f"Time until market open: {hours}h {minutes}m")
+            print(f"Current time: {current_time.strftime('%I:%M:%S %p ET')}")
+            print("Market hours: 9:30 AM - 4:00 PM ET (Mon-Fri)")
+            
+            if not is_market_open:
+                print("\nSkipping trading cycle - market is closed")
                 return
             
-            logger.info("\n" + "="*50)
-            logger.info("Starting new trading cycle...")
-            logger.info("="*50)
+            # Get initial portfolio summary
+            summary = self.get_portfolio_summary()
             
             # Check existing positions first
-            if self.positions:
-                logger.info("\nChecking existing positions:")
-                for symbol, pos in self.positions.items():
-                    logger.info(f"  {symbol}: {pos.direction} | Entry: ${pos.entry_price:.2f} | Current: ${pos.current_price:.2f} | P&L: ${pos.unrealized_pnl:.2f}")
-            else:
-                logger.info("\nNo open positions")
-            
             self.check_positions()
             
+            # Track predictions for all symbols
+            all_predictions = {}
+            
             # Look for new opportunities
-            logger.info("\nAnalyzing symbols for new opportunities:")
             for symbol in self.symbols:
                 try:
-                    if symbol in self.positions:
-                        logger.info(f"  {symbol}: Skipping - Already have position")
+                    # Get live data and generate predictions
+                    data = self.get_live_data(symbol)
+                    if data is None:
+                        logger.warning(f"Could not get live data for {symbol}")
                         continue
-                    
-                    logger.info(f"\nAnalyzing {symbol}:")
-                    signal = self.generate_trade_signal(symbol)
-                    
-                    if signal:
-                        logger.info(f"  Trade signal generated for {symbol}:")
-                        logger.info(f"    Direction: {signal.direction}")
-                        logger.info(f"    Confidence: {signal.confidence:.3f}")
-                        logger.info(f"    Entry Price: ${signal.entry_price:.2f}")
-                        logger.info(f"    Target: ${signal.target_price:.2f}")
-                        logger.info(f"    Stop Loss: ${signal.stop_loss:.2f}")
-                        logger.info(f"    Sentiment Score: {signal.sentiment_score:.3f}")
                         
-                        self.execute_trade(signal)
-                        time.sleep(1)  # Small delay between trades
-                    else:
-                        logger.info(f"  No actionable signal for {symbol}")
+                    predictions = self.ml_predictor.predict(data, symbol)
+                    if predictions:
+                        up_prob_3d, down_prob_3d = predictions['3d']
+                        confidence = max(up_prob_3d, down_prob_3d)
+                        direction = 'UP' if up_prob_3d > down_prob_3d else 'DOWN'
+                        sentiment_score = predictions.get('sentiment', {}).get('sentiment_score', 0.0)
+                        
+                        all_predictions[symbol] = {
+                            'confidence': confidence,
+                            'direction': direction,
+                            'sentiment_score': sentiment_score
+                        }
+                        
+                        # Only try to execute trades if not using dummy models
+                        if not isinstance(self.ml_predictor.model_3d, DummyClassifier):
+                            if symbol not in self.positions:
+                                signal = self.generate_trade_signal(symbol)
+                                if signal:
+                                    self.execute_trade(signal)
+                                    time.sleep(1)  # Small delay between trades
                     
                 except Exception as e:
                     logger.error(f"Error processing {symbol}: {str(e)}")
                     logger.error(f"Traceback: {traceback.format_exc()}")
                     continue
             
-            # Log portfolio status
-            total_pnl = sum(pos.unrealized_pnl for pos in self.positions.values())
-            logger.info("\nEnd of trading cycle summary:")
-            logger.info(f"  Portfolio Value: ${self.portfolio_value:,.2f}")
-            logger.info(f"  Open Positions: {len(self.positions)}")
-            logger.info(f"  Unrealized P&L: ${total_pnl:,.2f}")
-            logger.info("="*50 + "\n")
+            # Get final portfolio summary
+            final_summary = self.get_portfolio_summary()
+            
+            # Print portfolio summary
+            print("\n=== Portfolio Summary ===")
+            print(f"Portfolio Value: ${final_summary['portfolio_value']:,.2f}")
+            print(f"Open Positions: {final_summary['open_positions']}")
+            print(f"Unrealized P&L: ${final_summary['unrealized_pnl']:,.2f}")
+            print(f"Total Value: ${final_summary['total_value']:,.2f}")
+            
+            if final_summary['positions']:
+                print("\n=== Open Positions ===")
+                for symbol, pos in final_summary['positions'].items():
+                    print(f"{symbol}: {pos['quantity']} shares @ ${pos['entry_price']:.2f} "
+                          f"(Current: ${pos['current_price']:.2f}, P&L: ${pos['unrealized_pnl']:.2f})")
+            
+            print("\n=== ML Predictions ===")
+            if isinstance(self.ml_predictor.model_3d, DummyClassifier):
+                print("⚠️  Using dummy models (test mode) - predictions are random")
+                print(f"📊 Confidence Threshold: {self.confidence_threshold:.1%}\n")
+            
+            # Sort predictions by confidence
+            sorted_predictions = sorted(all_predictions.items(), key=lambda x: x[1]['confidence'], reverse=True)
+            
+            for symbol, pred in sorted_predictions:
+                confidence_color = '🟢' if pred['confidence'] > self.confidence_threshold else '🟡' if pred['confidence'] > 0.55 else '🔴'
+                threshold_indicator = '✓' if pred['confidence'] > self.confidence_threshold else 'x'
+                print(f"{symbol:<6} {confidence_color} {pred['confidence']:.1%} {pred['direction']:<4} "
+                      f"[{threshold_indicator}] (Sentiment: {pred['sentiment_score']:+.2f})")
+            
+            if not all_predictions:
+                print("No predictions available - check logs for errors")
+            print("\n")
             
         except Exception as e:
             logger.error(f"Error in trading cycle: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
+            return
     
     def get_portfolio_summary(self) -> Dict:
         """Get current portfolio summary"""
         total_unrealized_pnl = sum(pos.unrealized_pnl for pos in self.positions.values())
+        
+        # Get latest predictions for all symbols
+        symbol_predictions = {}
+        for symbol in self.symbols:
+            data = self.get_live_data(symbol)
+            if data is not None:
+                predictions = self.ml_predictor.predict(data, symbol)
+                if predictions:
+                    up_prob_3d, down_prob_3d = predictions['3d']
+                    confidence = max(up_prob_3d, down_prob_3d)
+                    direction = 'UP' if up_prob_3d > down_prob_3d else 'DOWN'
+                    symbol_predictions[symbol] = {
+                        'confidence': confidence,
+                        'direction': direction,
+                        'sentiment_score': predictions.get('sentiment', {}).get('sentiment_score', 0.0)
+                    }
         
         return {
             'portfolio_value': self.portfolio_value,
@@ -674,7 +758,8 @@ class LiveTradingBot:
                 'current_price': pos.current_price,
                 'unrealized_pnl': pos.unrealized_pnl,
                 'sentiment_score': pos.sentiment_score
-            } for symbol, pos in self.positions.items()}
+            } for symbol, pos in self.positions.items()},
+            'predictions': symbol_predictions
         }
 
 def start_live_trading(symbols: List[str] = None, paper_trading: bool = True, testing_mode: bool = False):

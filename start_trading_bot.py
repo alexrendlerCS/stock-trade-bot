@@ -25,7 +25,7 @@ def main():
     parser.add_argument('--paper', action='store_true', help='Run in paper trading mode')
     parser.add_argument('--testing', action='store_true', help='Run in testing mode with historical data')
     parser.add_argument('--symbols', nargs='+', help='List of stock symbols to trade',
-                      default=['AAPL', 'MSFT', 'TSLA', 'NVDA', 'GOOGL'])
+                      default=['AAPL', 'MSFT', 'TSLA', 'NVDA', 'GOOGL', 'META', 'COIN', 'BTC'])
     
     args = parser.parse_args()
     
@@ -38,7 +38,7 @@ def main():
         print("Mode: 📝 Paper Trading" if args.paper else "Mode: 💰 Live Trading")
     print(f"Symbols: {', '.join(args.symbols)}")
     print("Confidence Threshold: 65.0%")
-    print("Max Positions: 5")
+    print("Max Positions: 8")
     print("Risk Per Trade: 2.0%")
     print("============================================================\n")
     
