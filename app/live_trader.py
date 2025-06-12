@@ -15,6 +15,8 @@ import pytz
 from .core.config import settings
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import REST
+import traceback
+from sklearn.dummy import DummyClassifier
 
 # Set up logging
 logging.basicConfig(
