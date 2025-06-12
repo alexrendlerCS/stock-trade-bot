@@ -8,7 +8,9 @@ from dotenv import load_dotenv
 import ta
 import warnings
 from sklearn.exceptions import InconsistentVersionWarning
+from sklearn.dummy import DummyClassifier
 import os
+import numpy as np
 
 # Suppress scikit-learn version mismatch warning
 warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
@@ -33,11 +35,13 @@ class MLPredictor:
             except FileNotFoundError:
                 logger.warning("ML models not found. Using dummy models for testing.")
                 # Create simple dummy models that always predict 50/50
-                from sklearn.dummy import DummyClassifier
                 self.model_3d = DummyClassifier(strategy="uniform")
                 self.model_5d = DummyClassifier(strategy="uniform")
-                self.model_3d.fit([[0]], [0])  # Dummy fit
-                self.model_5d.fit([[0]], [0])  # Dummy fit
+                # Fit on two classes to ensure predict_proba returns two probabilities
+                X_dummy = np.zeros((2, 1))
+                y_dummy = [0, 1]
+                self.model_3d.fit(X_dummy, y_dummy)
+                self.model_5d.fit(X_dummy, y_dummy)
             
             # Load feature list
             self.feature_cols = self._get_fallback_features()
@@ -136,12 +140,17 @@ class MLPredictor:
             logger.info("\nRunning ML models...")
             pred_3d = self.model_3d.predict_proba(latest_features)[0]
             pred_5d = self.model_5d.predict_proba(latest_features)[0]
-            
-            # Calculate confidence scores
-            up_confidence_3d = pred_3d[1]
-            down_confidence_3d = pred_3d[0]
-            up_confidence_5d = pred_5d[1]
-            down_confidence_5d = pred_5d[0]
+            # Handle case where only one class is present
+            if len(pred_3d) == 2:
+                up_confidence_3d = pred_3d[1]
+                down_confidence_3d = pred_3d[0]
+            else:
+                up_confidence_3d = down_confidence_3d = 0.5
+            if len(pred_5d) == 2:
+                up_confidence_5d = pred_5d[1]
+                down_confidence_5d = pred_5d[0]
+            else:
+                up_confidence_5d = down_confidence_5d = 0.5
             
             logger.info("\nConfidence Analysis:")
             logger.info("3-Day Prediction:")
@@ -185,8 +194,8 @@ class MLPredictor:
                     logger.warning(f"Could not get sentiment info: {str(e)}")
             
             result = {
-                '3d': (pred_3d[1], pred_3d[0]),  # (up_prob, down_prob)
-                '5d': (pred_5d[1], pred_5d[0])   # (up_prob, down_prob)
+                '3d': (up_confidence_3d, down_confidence_3d),  # (up_prob, down_prob)
+                '5d': (up_confidence_5d, down_confidence_5d)   # (up_prob, down_prob)
             }
             
             # Add sentiment info if available
