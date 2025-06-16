@@ -17,16 +17,30 @@ import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import REST
 import traceback
 from sklearn.dummy import DummyClassifier
+import sys
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/trading_bot.log')  # Only log to file
+        logging.FileHandler('logs/trading_bot.log', encoding='utf-8'),  # Log to file with UTF-8 encoding
+        logging.StreamHandler(sys.stdout)  # Log to console with proper encoding
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Create a custom formatter for trading decisions
+class TradingFormatter(logging.Formatter):
+    def format(self, record):
+        if hasattr(record, 'trading_decision'):
+            return f"\n=== Trading Decision ===\n{record.msg}\n{'='*20}"
+        return super().format(record)
+
+# Add custom formatter to console handler
+for handler in logger.handlers:
+    if isinstance(handler, logging.StreamHandler):
+        handler.setFormatter(TradingFormatter())
 
 @dataclass
 class TradeSignal:

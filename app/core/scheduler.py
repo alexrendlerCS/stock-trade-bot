@@ -8,7 +8,8 @@ import logging
 logging.basicConfig(
     level=settings.LOG_LEVEL,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename=settings.LOG_FILE
+    filename=settings.LOG_FILE,
+    encoding='utf-8'
 )
 logger = logging.getLogger(__name__)
 
