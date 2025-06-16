@@ -18,36 +18,17 @@ from alpaca_trade_api.rest import REST
 import traceback
 from sklearn.dummy import DummyClassifier
 import sys
-from logging.handlers import RotatingFileHandler
 
 # Set up logging
-import logging
-import sys
-from logging.handlers import RotatingFileHandler
-
-# Create formatters
-detailed_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-summary_formatter = logging.Formatter('%(message)s')
-
-# Create handlers
-file_handler = RotatingFileHandler('logs/trading_bot.log', maxBytes=10485760, backupCount=5, encoding='utf-8')
-file_handler.setFormatter(detailed_formatter)
-file_handler.setLevel(logging.INFO)
-
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(summary_formatter)
-console_handler.setLevel(logging.INFO)
-
-# Create logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/trading_bot.log', encoding='utf-8'),  # Log to file with UTF-8 encoding
+        logging.StreamHandler(sys.stdout)  # Log to console with proper encoding
+    ]
+)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
-
-# Create a separate logger for summary output
-summary_logger = logging.getLogger('summary')
-summary_logger.setLevel(logging.INFO)
-summary_logger.addHandler(console_handler)
 
 @dataclass
 class TradeSignal:
@@ -213,39 +194,74 @@ class LiveTradingBot:
         logger.info("Market is open")
         return True
     
-    def get_live_data(self, symbol: str, period: str = '60d') -> Optional[pd.DataFrame]:
+    def get_live_data(self, symbol: str, period: str = '5d') -> Optional[pd.DataFrame]:
         """Get live market data for a symbol"""
         try:
             logger.info(f"Fetching data for {symbol}...")
-            logger.info(f"Attempting to fetch 15-minute data for {symbol}")
-            
-            # Get data from yfinance
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval='15m')
             
-            if df.empty:
-                logger.warning(f"No data available for {symbol}")
+            if self.testing_mode:
+                # In testing mode, fetch historical data up to current_test_time
+                end_date = self.current_test_time
+                start_date = end_date - timedelta(days=60)  # Get 60 days of data
+                
+                logger.info(f"Testing Mode: Fetching historical data from {start_date.date()} to {end_date.date()}")
+                df = ticker.history(start=start_date, end=end_date, interval='1d')
+                
+                if df.empty:
+                    logger.warning(f"No historical data available for {symbol}")
+                    return None
+                
+                logger.info(f"Retrieved {len(df)} historical daily points for {symbol}")
+            else:
+                # Normal live trading mode
+                logger.info(f"Attempting to fetch 15-minute data for {symbol}")
+                df = ticker.history(period='30d', interval='15m')
+                
+                if df.empty:
+                    logger.info(f"No intraday data available for {symbol}, falling back to daily data")
+                    df = ticker.history(period='30d', interval='1d')
+                    if df.empty:
+                        logger.warning(f"No data available for {symbol}")
+                        return None
+                
+                logger.info(f"Retrieved {len(df)} raw data points for {symbol}")
+                
+                # Resample to daily data if we got intraday
+                if len(df) > 10:  # If we got intraday data
+                    logger.info(f"Resampling intraday data to daily for {symbol}")
+                    df = df.resample('D').agg({
+                        'Open': 'first',
+                        'High': 'max',
+                        'Low': 'min',
+                        'Close': 'last',
+                        'Volume': 'sum'
+                    }).dropna()
+                    logger.info(f"Resampled to {len(df)} daily points for {symbol}")
+            
+            # Clean column names
+            df.columns = [col.lower() for col in df.columns]
+            
+            # Ensure we have enough data
+            if len(df) < 10:
+                logger.warning(f"Insufficient data points for {symbol}: only {len(df)} days available")
                 return None
             
-            logger.info(f"Retrieved {len(df)} raw data points for {symbol}")
+            # Fix for stock splits and adjustments
+            if symbol == 'NVDA' and df['close'].mean() < 100:
+                logger.info(f"Adjusting NVDA price data for split")
+                df['open'] *= 10
+                df['high'] *= 10
+                df['low'] *= 10
+                df['close'] *= 10
             
-            # Resample to daily data
-            logger.info(f"Resampling intraday data to daily for {symbol}")
-            df = df.resample('D').agg({
-                'Open': 'first',
-                'High': 'max',
-                'Low': 'min',
-                'Close': 'last',
-                'Volume': 'sum'
-            }).dropna()
-            
-            logger.info(f"Resampled to {len(df)} daily points for {symbol}")
             logger.info(f"Final dataset for {symbol}: {len(df)} days from {df.index[0]} to {df.index[-1]}")
             logger.info(f"Latest price for {symbol}: ${df['close'].iloc[-1]:.2f}")
             return df
             
         except Exception as e:
             logger.error(f"Error fetching data for {symbol}: {str(e)}")
+            import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             return None
     
@@ -591,19 +607,63 @@ class LiveTradingBot:
     def run_trading_cycle(self):
         """Run one complete trading cycle"""
         try:
-            # Log detailed cycle start to file
-            logger.info("\nStarting new trading cycle...")
+            # Check market status
+            is_market_open = self.is_market_open()
+            current_time = datetime.now(pytz.timezone('America/New_York'))
+            market_open_time = current_time.replace(hour=9, minute=30, second=0, microsecond=0)
+            market_close_time = current_time.replace(hour=16, minute=0, second=0, microsecond=0)
             
-            # Check if market is open
-            if not self.is_market_open():
-                logger.info("Market is closed, skipping cycle")
+            # Print market status header with current time
+            print("\n=== Market Status ===")
+            print(f"Current Time (ET): {current_time.strftime('%I:%M:%S %p')}")
+            print(f"Trading Hours: 9:30 AM - 4:00 PM ET (Mon-Fri)")
+            
+            if is_market_open:
+                print("\n🟢 Market is OPEN")
+                time_to_close = market_close_time - current_time
+                hours, remainder = divmod(time_to_close.seconds, 3600)
+                minutes = remainder // 60
+                print(f"Time until market close: {hours}h {minutes:02d}m")
+            else:
+                print("\n🔴 Market is CLOSED")
+                
+                if current_time.weekday() >= 5:  # Weekend
+                    days_to_monday = (7 - current_time.weekday())
+                    next_open = current_time + timedelta(days=days_to_monday)
+                    next_open = next_open.replace(hour=9, minute=30, second=0, microsecond=0)
+                    print(f"Reason: Weekend ({current_time.strftime('%A')})")
+                elif current_time < market_open_time:  # Pre-market
+                    next_open = market_open_time
+                    print("Reason: Pre-market hours")
+                else:  # After-hours
+                    next_open = (current_time + timedelta(days=1)).replace(hour=9, minute=30, second=0, microsecond=0)
+                    while next_open.weekday() >= 5:  # Skip weekends
+                        next_open += timedelta(days=1)
+                    print("Reason: After-hours")
+                
+                # Calculate time until next market open
+                time_to_open = next_open - current_time
+                total_hours = time_to_open.days * 24 + time_to_open.seconds // 3600
+                minutes = (time_to_open.seconds % 3600) // 60
+                
+                # Format next market open date
+                next_open_str = next_open.strftime("%A, %B %-d")  # This will show e.g., "Friday, February 9"
+                
+                print(f"Next market open: {next_open_str} at 9:30 AM ET")
+                print(f"Time until market open: {total_hours}h {minutes:02d}m")
+            
+            if not is_market_open:
+                print("\nSkipping trading cycle - market is closed")
                 return
             
-            # Update portfolio value
-            self.portfolio_value = self._get_account_balance()
+            # Get initial portfolio summary
+            summary = self.get_portfolio_summary()
             
-            # Check existing positions
+            # Check existing positions first
             self.check_positions()
+            
+            # Track predictions for all symbols
+            all_predictions = {}
             
             # Look for new opportunities
             for symbol in self.symbols:
@@ -621,11 +681,11 @@ class LiveTradingBot:
                         direction = 'UP' if up_prob_3d > down_prob_3d else 'DOWN'
                         sentiment_score = predictions.get('sentiment', {}).get('sentiment_score', 0.0)
                         
-                        # Log detailed prediction to file
-                        logger.info(f"\nPrediction for {symbol}:")
-                        logger.info(f"3-day Up Probability: {up_prob_3d:.3f}")
-                        logger.info(f"3-day Down Probability: {down_prob_3d:.3f}")
-                        logger.info(f"Sentiment Score: {sentiment_score:.3f}")
+                        all_predictions[symbol] = {
+                            'confidence': confidence,
+                            'direction': direction,
+                            'sentiment_score': sentiment_score
+                        }
                         
                         # Only try to execute trades if not using dummy models
                         if not isinstance(self.ml_predictor.model_3d, DummyClassifier):
@@ -634,7 +694,7 @@ class LiveTradingBot:
                                 if signal:
                                     self.execute_trade(signal)
                                     time.sleep(1)  # Small delay between trades
-                
+                    
                 except Exception as e:
                     logger.error(f"Error processing {symbol}: {str(e)}")
                     logger.error(f"Traceback: {traceback.format_exc()}")
@@ -643,8 +703,36 @@ class LiveTradingBot:
             # Get final portfolio summary
             final_summary = self.get_portfolio_summary()
             
-            # Log cycle completion to file
-            logger.info("\nTrading cycle completed successfully")
+            # Print portfolio summary
+            print("\n=== Portfolio Summary ===")
+            print(f"Portfolio Value: ${final_summary['portfolio_value']:,.2f}")
+            print(f"Open Positions: {final_summary['open_positions']}")
+            print(f"Unrealized P&L: ${final_summary['unrealized_pnl']:,.2f}")
+            print(f"Total Value: ${final_summary['total_value']:,.2f}")
+            
+            if final_summary['positions']:
+                print("\n=== Open Positions ===")
+                for symbol, pos in final_summary['positions'].items():
+                    print(f"{symbol}: {pos['quantity']} shares @ ${pos['entry_price']:.2f} "
+                          f"(Current: ${pos['current_price']:.2f}, P&L: ${pos['unrealized_pnl']:.2f})")
+            
+            print("\n=== ML Predictions ===")
+            if isinstance(self.ml_predictor.model_3d, DummyClassifier):
+                print("⚠️  Using dummy models (test mode) - predictions are random")
+                print(f"📊 Confidence Threshold: {self.confidence_threshold:.1%}\n")
+            
+            # Sort predictions by confidence
+            sorted_predictions = sorted(all_predictions.items(), key=lambda x: x[1]['confidence'], reverse=True)
+            
+            for symbol, pred in sorted_predictions:
+                confidence_color = '🟢' if pred['confidence'] > self.confidence_threshold else '🟡' if pred['confidence'] > 0.55 else '🔴'
+                threshold_indicator = '✓' if pred['confidence'] > self.confidence_threshold else 'x'
+                print(f"{symbol:<6} {confidence_color} {pred['confidence']:.1%} {pred['direction']:<4} "
+                      f"[{threshold_indicator}] (Sentiment: {pred['sentiment_score']:+.2f})")
+            
+            if not all_predictions:
+                print("No predictions available - check logs for errors")
+            print("\n")
             
         except Exception as e:
             logger.error(f"Error in trading cycle: {str(e)}")
@@ -671,7 +759,7 @@ class LiveTradingBot:
                         'sentiment_score': predictions.get('sentiment', {}).get('sentiment_score', 0.0)
                     }
         
-        summary = {
+        return {
             'portfolio_value': self.portfolio_value,
             'open_positions': len(self.positions),
             'unrealized_pnl': total_unrealized_pnl,
@@ -686,26 +774,6 @@ class LiveTradingBot:
             } for symbol, pos in self.positions.items()},
             'predictions': symbol_predictions
         }
-        
-        # Log detailed summary to file
-        logger.info(f"Detailed Portfolio Summary: {json.dumps(summary, indent=2)}")
-        
-        # Print formatted summary to console
-        summary_logger.info("\n=== Portfolio Summary ===")
-        summary_logger.info(f"Portfolio Value: ${summary['portfolio_value']:,.2f}")
-        summary_logger.info(f"Open Positions: {summary['open_positions']}")
-        summary_logger.info(f"Unrealized P&L: ${summary['unrealized_pnl']:,.2f}")
-        summary_logger.info(f"Total Value: ${summary['total_value']:,.2f}")
-        
-        summary_logger.info("\n=== ML Predictions ===")
-        for symbol, pred in summary['predictions'].items():
-            direction = pred['direction']
-            confidence = pred['confidence'] * 100
-            sentiment = pred['sentiment_score']
-            emoji = "🟢" if confidence >= 65 else "🟡" if confidence >= 55 else "🔴"
-            summary_logger.info(f"{symbol:<6} {emoji} {confidence:5.1f}% {direction:<4} [x] (Sentiment: {sentiment:+.2f})")
-        
-        return summary
 
 def start_live_trading(symbols: List[str] = None, paper_trading: bool = True, testing_mode: bool = False):
     """Start the live trading bot
